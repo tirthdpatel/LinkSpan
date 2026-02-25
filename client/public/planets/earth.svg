@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="g" cx="35%" cy="35%"><stop offset="0%" stop-color="#87ceeb"/><stop offset="50%" stop-color="#2171b5"/><stop offset="100%" stop-color="#0a3d6b"/></radialGradient>
+    <radialGradient id="shine" cx="30%" cy="25%"><stop offset="0%" stop-color="white" stop-opacity=".35"/><stop offset="100%" stop-color="transparent"/></radialGradient>
+  </defs>
+  <circle cx="50" cy="50" r="48" fill="url(#g)"/>
+  <!-- Continents -->
+  <ellipse cx="38" cy="32" rx="14" ry="10" fill="#2e7d32" opacity=".65" transform="rotate(-20 38 32)"/>
+  <ellipse cx="62" cy="38" rx="10" ry="16" fill="#33691e" opacity=".55" transform="rotate(15 62 38)"/>
+  <ellipse cx="35" cy="58" rx="18" ry="8" fill="#4a7c2f" opacity=".5" transform="rotate(-10 35 58)"/>
+  <ellipse cx="60" cy="62" rx="8" ry="12" fill="#2e7d32" opacity=".45" transform="rotate(25 60 62)"/>
+  <ellipse cx="50" cy="45" rx="6" ry="5" fill="#5d4037" opacity=".3"/>
+  <!-- Ice caps -->
+  <ellipse cx="50" cy="8" rx="20" ry="6" fill="white" opacity=".5"/>
+  <ellipse cx="50" cy="92" rx="18" ry="5" fill="white" opacity=".4"/>
+  <!-- Clouds -->
+  <ellipse cx="30" cy="25" rx="12" ry="3" fill="white" opacity=".25" transform="rotate(-15 30 25)"/>
+  <ellipse cx="65" cy="50" rx="15" ry="3" fill="white" opacity=".2" transform="rotate(10 65 50)"/>
+  <circle cx="50" cy="50" r="48" fill="url(#shine)"/>
+</svg>

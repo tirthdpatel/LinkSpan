@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="g" cx="35%" cy="35%"><stop offset="0%" stop-color="#b8e8f5"/><stop offset="50%" stop-color="#7ec8e3"/><stop offset="100%" stop-color="#3a7d99"/></radialGradient>
+  </defs>
+  <!-- Thin ring -->
+  <ellipse cx="50" cy="50" rx="48" ry="8" fill="none" stroke="#7ec8e3" stroke-width="1.5" opacity=".35"/>
+  <circle cx="50" cy="50" r="42" fill="url(#g)"/>
+  <!-- Atmospheric bands -->
+  <clipPath id="cp"><circle cx="50" cy="50" r="42"/></clipPath>
+  <g clip-path="url(#cp)">
+    <ellipse cx="50" cy="32" rx="40" ry="4" fill="rgba(180,230,245,.2)"/>
+    <ellipse cx="50" cy="48" rx="38" ry="3" fill="rgba(160,215,235,.15)"/>
+    <ellipse cx="50" cy="62" rx="40" ry="4" fill="rgba(170,220,240,.18)"/>
+  </g>
+</svg>

@@ -1,0 +1,28 @@
+{
+  "name": "linkspan-server",
+  "version": "1.0.0",
+  "description": "LinkSpan signaling server for WebRTC peer-to-peer file transfer",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "lint": "eslint src/",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "helmet": "^8.0.0",
+    "rate-limiter-flexible": "^5.0.0",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

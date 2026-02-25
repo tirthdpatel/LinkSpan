@@ -1,0 +1,525 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f8f9fa;
+    --bg-card: #ffffff;
+    --bg-glass: rgba(255, 255, 255, 0.5);
+    --bg-glass-strong: rgba(255, 255, 255, 0.65);
+    --text-primary: #212529;
+    --text-secondary: #495057;
+    --text-muted: #868e96;
+    --border-color: rgba(200, 206, 215, 0.7);
+    --shadow-color: rgba(0, 0, 0, 0.1);
+    --gradient-start: #4263eb;
+    --gradient-mid: #5c7cfa;
+    --gradient-end: #748ffc;
+    --glow-color: rgba(66, 99, 235, 0.15);
+  }
+
+  .dark {
+    --bg-primary: #0a0b10;
+    --bg-secondary: #12141a;
+    --bg-card: #16181f;
+    --bg-glass: rgba(22, 24, 31, 0.2);
+    --bg-glass-strong: rgba(22, 24, 31, 0.4);
+    --text-primary: #f1f3f5;
+    --text-secondary: #ced4da;
+    --text-muted: #868e96;
+    --border-color: rgba(44, 46, 51, 0.6);
+    --shadow-color: rgba(0, 0, 0, 0.4);
+    --gradient-start: #5c7cfa;
+    --gradient-mid: #748ffc;
+    --gradient-end: #91a7ff;
+    --glow-color: rgba(92, 124, 250, 0.2);
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * {
+    border-color: var(--border-color);
+  }
+}
+
+@layer components {
+
+  /* ─── Glassmorphism — lighter blur for performance ──────── */
+
+  .glass-card {
+    background: var(--bg-glass);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    box-shadow: 0 4px 24px var(--shadow-color);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    position: relative;
+    will-change: transform;
+  }
+
+  .glass-card:hover {
+    transform: translateY(-6px) scale(1.04);
+    border-color: var(--gradient-start);
+    box-shadow:
+      0 16px 48px var(--shadow-color),
+      0 0 30px var(--glow-color);
+  }
+
+  /* ─── Interactive Card — fast response ──────────────────── */
+
+  .interactive-card {
+    background: var(--bg-glass);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    box-shadow: 0 4px 24px var(--shadow-color);
+    cursor: pointer;
+    will-change: transform;
+  }
+
+  .interactive-card:hover {
+    transform: translateY(-6px) scale(1.12);
+    border-color: var(--gradient-start);
+    box-shadow:
+      0 20px 56px var(--shadow-color),
+      0 0 36px var(--glow-color);
+  }
+
+  /* Glow border — mouse tracking */
+  .interactive-card .glow-border {
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    background: radial-gradient(250px circle at var(--glow-x, 50%) var(--glow-y, 50%),
+        var(--gradient-start) 0%,
+        transparent 70%);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+    z-index: 0;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    padding: 1.5px;
+  }
+
+  .interactive-card:hover .glow-border {
+    opacity: 0.5;
+  }
+
+  .interactive-card .glare-overlay {
+    border-radius: inherit;
+  }
+
+  /* ─── Gradient Text — fast animation ────────────────────── */
+
+  .gradient-text {
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-mid), var(--gradient-end));
+    background-size: 200% 200%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: gradient-shift 4s ease-in-out infinite;
+  }
+
+  @keyframes gradient-shift {
+
+    0%,
+    100% {
+      background-position: 0% 50%;
+    }
+
+    50% {
+      background-position: 100% 50%;
+    }
+  }
+
+  .gradient-bg {
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+  }
+
+  .gradient-border {
+    position: relative;
+    border: none;
+  }
+
+  .gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1.5px;
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* ─── Magnetic Button — instant response ────────────────── */
+
+  .magnetic-btn {
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+    box-shadow: 0 4px 14px rgba(66, 99, 235, 0.35);
+    transition: box-shadow 0.1s ease, transform 0.1s ease;
+    position: relative;
+    overflow: hidden;
+    will-change: transform;
+  }
+
+  .magnetic-btn:hover {
+    box-shadow:
+      0 8px 24px rgba(66, 99, 235, 0.45),
+      0 0 16px rgba(66, 99, 235, 0.2);
+  }
+
+  .magnetic-btn:active {
+    transform: scale(0.97);
+  }
+
+  .btn-content {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* ─── Glow Icon — instant hover ─────────────────────────── */
+
+  .glow-icon {
+    width: 3.5rem;
+    height: 3.5rem;
+    border-radius: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+    box-shadow: 0 4px 16px var(--glow-color);
+    position: relative;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+
+  /* icon glow intensifies on card hover, but no separate scale
+     (the card's tilt hook handles uniform scaling) */
+  .interactive-card:hover .glow-icon,
+  .glass-card:hover .glow-icon {
+    box-shadow: 0 6px 24px var(--glow-color);
+  }
+
+  /* ─── Buttons ───────────────────────────────────────────── */
+
+  .btn-primary {
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+    box-shadow: 0 4px 14px rgba(66, 99, 235, 0.35);
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+
+  .btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(66, 99, 235, 0.45);
+  }
+
+  .btn-primary:active {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .btn-secondary {
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: var(--bg-glass);
+    border: 1px solid var(--border-color);
+    transition: transform 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease;
+  }
+
+  .btn-secondary:hover {
+    border-color: var(--gradient-start);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px var(--glow-color);
+  }
+
+  .btn-secondary:active {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .input-field {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    border-radius: 0.75rem;
+    font-size: 1rem;
+    outline: none;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1.5px solid var(--border-color);
+    transition: border-color 0.1s ease, box-shadow 0.1s ease;
+  }
+
+  .input-field:focus {
+    border-color: var(--gradient-start);
+    box-shadow: 0 0 0 3px var(--glow-color);
+  }
+
+  /* ─── Drop Zone ─────────────────────────────────────────── */
+
+  .drop-zone {
+    border-radius: 1rem;
+    padding: 2.5rem;
+    text-align: center;
+    cursor: pointer;
+    border: 2px dashed var(--border-color);
+    background: var(--bg-secondary);
+    transition: border-color 0.1s ease, box-shadow 0.1s ease, transform 0.1s ease;
+  }
+
+  .drop-zone:hover,
+  .drop-zone.active {
+    border-color: var(--gradient-start);
+    background: rgba(66, 99, 235, 0.04);
+    box-shadow: 0 0 0 4px var(--glow-color);
+    transform: scale(1.01);
+  }
+
+  /* ─── Progress Bar ──────────────────────────────────────── */
+
+  .progress-bar-track {
+    width: 100%;
+    height: 0.75rem;
+    border-radius: 9999px;
+    overflow: hidden;
+    background: var(--bg-secondary);
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 9999px;
+    background: linear-gradient(90deg, var(--gradient-start), var(--gradient-mid), var(--gradient-end));
+    background-size: 200% 100%;
+    animation: progress-shimmer 2s linear infinite;
+    transition: width 0.2s ease;
+    box-shadow: 0 0 10px var(--glow-color);
+  }
+
+  @keyframes progress-shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+
+    100% {
+      background-position: -200% 0;
+    }
+  }
+
+  /* ─── Stat Card ─────────────────────────────────────────── */
+
+  .stat-card {
+    padding: 1rem;
+    border-radius: 0.75rem;
+    background: var(--bg-glass);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--border-color);
+    transition: transform 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease;
+  }
+
+  .stat-card:hover {
+    border-color: var(--gradient-start);
+    box-shadow: 0 0 16px var(--glow-color);
+    transform: translateY(-2px);
+  }
+
+  /* ─── Chips ─────────────────────────────────────────────── */
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .chip-success {
+    background: rgba(64, 192, 87, 0.12);
+    color: #40c057;
+  }
+
+  .chip-warning {
+    background: rgba(253, 126, 20, 0.12);
+    color: #fd7e14;
+  }
+
+  .chip-error {
+    background: rgba(250, 82, 82, 0.12);
+    color: #fa5252;
+  }
+
+  .chip-info {
+    background: rgba(92, 124, 250, 0.12);
+    color: #5c7cfa;
+  }
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: var(--text-muted);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* ─── Animations — snappy, 60fps ────────────────────────── */
+
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out both;
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.35s ease-out both;
+}
+
+@keyframes glow-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 8px var(--glow-color);
+  }
+
+  50% {
+    box-shadow: 0 0 20px var(--glow-color);
+  }
+}
+
+.animate-glow-pulse {
+  animation: glow-pulse 2.5s ease-in-out infinite;
+}
+
+/* Stagger children */
+.stagger-children>*:nth-child(1) {
+  animation-delay: 0ms;
+}
+
+.stagger-children>*:nth-child(2) {
+  animation-delay: 60ms;
+}
+
+.stagger-children>*:nth-child(3) {
+  animation-delay: 120ms;
+}
+
+.stagger-children>*:nth-child(4) {
+  animation-delay: 180ms;
+}
+
+.stagger-children>*:nth-child(5) {
+  animation-delay: 240ms;
+}
+
+.stagger-children>*:nth-child(6) {
+  animation-delay: 300ms;
+}
+
+/* ─── macOS Dock Magnification ──────────────────────────── */
+
+.dock-container {
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.dock-item {
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  will-change: transform;
+  transform-origin: bottom center;
+}
+
+/* Hovered item — largest */
+.dock-container .dock-item:hover {
+  transform: scale(1.25) translateY(-6px);
+  box-shadow: 0 8px 24px var(--glow-color);
+  border-color: var(--gradient-start);
+  z-index: 2;
+}
+
+/* Direct neighbors — medium scale */
+.dock-container .dock-item:hover+.dock-item,
+.dock-container .dock-item:has(+ .dock-item:hover) {
+  transform: scale(1.1) translateY(-3px);
+  z-index: 1;
+}
+
+/* Two away — slight scale */
+.dock-container .dock-item:hover+.dock-item+.dock-item,
+.dock-container .dock-item:has(+ .dock-item + .dock-item:hover) {
+  transform: scale(1.04) translateY(-1px);
+}

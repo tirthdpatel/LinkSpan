@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="g" cx="35%" cy="35%"><stop offset="0%" stop-color="#7b9ee8"/><stop offset="50%" stop-color="#3b5ddb"/><stop offset="100%" stop-color="#1a2f6e"/></radialGradient>
+  </defs>
+  <circle cx="50" cy="50" r="48" fill="url(#g)"/>
+  <!-- Storm bands and Great Dark Spot -->
+  <clipPath id="cp"><circle cx="50" cy="50" r="48"/></clipPath>
+  <g clip-path="url(#cp)">
+    <ellipse cx="50" cy="30" rx="45" ry="5" fill="rgba(100,140,220,.2)"/>
+    <ellipse cx="50" cy="50" rx="42" ry="4" fill="rgba(80,120,200,.15)"/>
+    <ellipse cx="50" cy="68" rx="44" ry="5" fill="rgba(90,130,210,.18)"/>
+    <!-- Great Dark Spot -->
+    <ellipse cx="40" cy="42" rx="10" ry="7" fill="rgba(15,25,80,.3)" transform="rotate(-5 40 42)"/>
+  </g>
+</svg>

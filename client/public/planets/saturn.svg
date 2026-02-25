@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="g" cx="35%" cy="35%"><stop offset="0%" stop-color="#f5e6b8"/><stop offset="50%" stop-color="#d4a843"/><stop offset="100%" stop-color="#8b6914"/></radialGradient>
+    <clipPath id="cp"><circle cx="50" cy="50" r="25"/></clipPath>
+  </defs>
+  <!-- Outer ring (behind) -->
+  <ellipse cx="50" cy="50" rx="48" ry="10" fill="none" stroke="#c9a84c" stroke-width="3" opacity=".4"/>
+  <ellipse cx="50" cy="50" rx="44" ry="8" fill="none" stroke="#b8943f" stroke-width="2" opacity=".3"/>
+  <!-- Planet body -->
+  <circle cx="50" cy="50" r="25" fill="url(#g)"/>
+  <!-- Bands clipped to planet -->
+  <g clip-path="url(#cp)">
+    <rect x="25" y="34" width="50" height="4" fill="rgba(160,100,40,.3)"/>
+    <rect x="25" y="42" width="50" height="3" fill="rgba(130,80,25,.2)"/>
+    <rect x="25" y="50" width="50" height="4" fill="rgba(170,110,45,.25)"/>
+    <rect x="25" y="58" width="50" height="3" fill="rgba(140,85,30,.2)"/>
+    <rect x="25" y="65" width="50" height="4" fill="rgba(150,95,35,.15)"/>
+  </g>
+  <!-- Front ring arc (in front of planet) — top half hidden -->
+  <ellipse cx="50" cy="50" rx="48" ry="10" fill="none" stroke="#c9a84c" stroke-width="2.5" opacity=".3" stroke-dasharray="75,76" stroke-dashoffset="-38"/>
+</svg>

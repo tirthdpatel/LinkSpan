@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="g" cx="40%" cy="40%"><stop offset="0%" stop-color="#fff8e1"/><stop offset="30%" stop-color="#ffd54f"/><stop offset="60%" stop-color="#ff9800"/><stop offset="100%" stop-color="#e65100"/></radialGradient>
+    <radialGradient id="corona" cx="50%" cy="50%"><stop offset="50%" stop-color="transparent"/><stop offset="70%" stop-color="rgba(255,200,50,.08)"/><stop offset="100%" stop-color="rgba(255,150,0,.03)"/></radialGradient>
+  </defs>
+  <circle cx="50" cy="50" r="50" fill="url(#corona)"/>
+  <circle cx="50" cy="50" r="42" fill="url(#g)"/>
+  <!-- Surface details -->
+  <circle cx="35" cy="38" r="5" fill="rgba(255,220,100,.3)"/>
+  <circle cx="58" cy="55" r="4" fill="rgba(255,180,50,.2)"/>
+  <circle cx="45" cy="60" r="6" fill="rgba(230,120,0,.15)"/>
+</svg>
