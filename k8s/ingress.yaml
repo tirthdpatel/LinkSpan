@@ -1,0 +1,60 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: linkspan-ingress
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+  annotations:
+    # nginx-ingress controller annotations
+    kubernetes.io/ingress.class: "nginx"
+
+    # TLS — cert-manager issues certificates automatically
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # WebSocket support for signaling server
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+    # Security headers
+    nginx.ingress.kubernetes.io/enable-cors: "false"  # handled by server
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # Body size (signaling messages are small)
+    nginx.ingress.kubernetes.io/proxy-body-size: "64k"
+spec:
+  tls:
+    - hosts:
+        - linkspan.app
+        - signal.linkspan.app
+      secretName: linkspan-tls
+  rules:
+    # SPA client
+    - host: linkspan.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: linkspan-client
+                port:
+                  number: 80
+
+    # Signaling server (WebSocket + HTTP)
+    - host: signal.linkspan.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: linkspan-signaling
+                port:
+                  number: 10000

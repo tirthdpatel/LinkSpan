@@ -1,0 +1,40 @@
+# LinkSpan — Trivy ignore policy (YAML form: supports per-finding path scoping + expiry).
+#
+# Policy: suppress ONLY findings that are dev-only or genuinely required by the
+# architecture, each with a statement (rationale) and a re-review date. Runtime CVEs and
+# fixable hardening gaps are never suppressed — they are fixed.
+
+vulnerabilities:
+  - id: GHSA-gv7w-rqvm-qjhr
+    # esbuild — missing binary integrity verification in Deno's install path. Dev-only:
+    # a transitive Vite build-toolchain dep (client devDeps), not in the runtime bundle,
+    # and LinkSpan never uses the Deno install path. Fix exists (esbuild 0.28.1) — bump
+    # via Vite when convenient. (npm dev deps are also suppressed by trivy default.)
+    statement: "Dev-only Vite/esbuild build-toolchain CVE; not shipped at runtime."
+    expiredAt: 2026-09-15
+
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - "client/Dockerfile"
+    # nginx:alpine runs its master as root to manage workers. This image is deployed
+    # ONLY via k8s/client-deployment.yaml, which enforces non-root at runtime
+    # (runAsNonRoot, runAsUser 101, readOnlyRootFilesystem, drop ALL caps, NET_BIND_SERVICE).
+    # Preferred fix is the nginxinc/nginx-unprivileged base (listen 8080), pending a
+    # Docker build/run to verify (no Docker in the current dev env).
+    statement: "Deployed only via k8s which enforces non-root; Dockerfile USER fix pending build-verify."
+    expiredAt: 2026-09-15
+
+  - id: AVD-KSV-0009
+    paths:
+      - "k8s/coturn-deployment.yaml"
+    # hostNetwork is REQUIRED for TURN: coturn must see real client source IPs (not a
+    # NAT/CNI address) to allocate working relays. Architectural, not a fixable gap.
+    statement: "coturn requires hostNetwork for TURN relay allocation (real source IPs)."
+
+  - id: AVD-KSV-0024
+    paths:
+      - "k8s/coturn-deployment.yaml"
+    # hostPort is REQUIRED for TURN: clients reach the well-known TURN ports (3478/5349)
+    # on the node's real IP; they cannot sit behind a cluster Service/NAT.
+    statement: "coturn requires hostPort for the well-known TURN ports on the node IP."

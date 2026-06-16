@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linkspan-config
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+data:
+  # Signaling server configuration
+  PORT: "10000"
+  NODE_ENV: "production"
+  CORS_ORIGIN: "https://linkspan.app"
+
+  # Proxy trust — number of trusted upstream hops for X-Forwarded-For
+  # In Kubernetes behind nginx ingress: 1 (nginx adds one hop)
+  # In Kubernetes behind CDN + nginx: 2
+  # In development (no proxy): 0
+  TRUSTED_PROXY_COUNT: "1"
+
+  # Session limits
+  MAX_CONNECTIONS_PER_MIN: "10"
+  MAX_SESSIONS_PER_HOUR: "5"
+  MAX_MESSAGES_PER_SEC: "100"
+  MAX_JOIN_ATTEMPTS_PER_MIN: "10"
+
+  # Turn server
+  TURN_URLS: "turns:turn.linkspan.app:5349"

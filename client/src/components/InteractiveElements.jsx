@@ -5,7 +5,7 @@ import { useGlowTrack } from '../hooks/useInteractiveEffects';
  * InteractiveCard — Card with 3D tilt, glow border tracking, and elevation hover.
  * Tilt + scale is done inline here (not in a hook) to avoid ref timing issues.
  */
-export function InteractiveCard({ children, className = '', onClick, id, tiltOpts = {} }) {
+export function InteractiveCard({ children, className = '', onClick, id, tiltOpts = {}, ...rest }) {
     const { ref: glowRef } = useGlowTrack();
     const cardRef = useRef(null);
     const glareRef = useRef(null);
@@ -77,6 +77,7 @@ export function InteractiveCard({ children, className = '', onClick, id, tiltOpt
             className={`interactive-card ${className}`}
             style={{ position: 'relative', overflow: 'hidden' }}
             onClick={onClick}
+            {...rest}
         >
             {/* Glow border that follows mouse */}
             <div className="glow-border" />

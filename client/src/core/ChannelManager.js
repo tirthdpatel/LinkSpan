@@ -17,6 +17,8 @@ export class ChannelManager {
         /** @type {{ bytes: number, timestamp: number }[]} */
         this.stats = [];
         this._onMessage = null;
+        /** @type {Function | null} one-time interceptor for FILE_META detection */
+        this._onFirstMessage = null;
     }
 
     /**
@@ -39,6 +41,10 @@ export class ChannelManager {
 
             ch.onmessage = (event) => {
                 this.stats[i].bytes += event.data.byteLength || event.data.length || 0;
+                // Fire one-time interceptor first (for FILE_META detection)
+                if (this._onFirstMessage) {
+                    this._onFirstMessage(event.data, i);
+                }
                 if (this._onMessage) {
                     this._onMessage(event.data, i);
                 }
@@ -51,11 +57,28 @@ export class ChannelManager {
     }
 
     /**
-     * Set the message handler.
+     * Set the primary message handler (replaces any previous handler).
      * @param {Function} handler - (data: ArrayBuffer | string, channelIndex: number) => void
      */
     onMessage(handler) {
         this._onMessage = handler;
+    }
+
+    /**
+     * Register a one-time message interceptor.
+     * Fires on every message until offFirstMessage() is called.
+     * Used by App.jsx for event-driven FILE_META detection.
+     * @param {Function} handler
+     */
+    onFirstMessage(handler) {
+        this._onFirstMessage = handler;
+    }
+
+    /**
+     * Remove the one-time interceptor.
+     */
+    offFirstMessage() {
+        this._onFirstMessage = null;
     }
 
     /**

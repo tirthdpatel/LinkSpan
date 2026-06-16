@@ -25,4 +25,17 @@ export default defineConfig({
             },
         },
     },
+    test: {
+        // Use Node environment: gives us access to node:crypto (Web Crypto API)
+        // and avoids jsdom limitations (no IndexedDB, no SubtleCrypto).
+        environment: 'node',
+        globals: false,
+        // Make Web Crypto available globally (Node 18 has it under globalThis.crypto)
+        setupFiles: ['./src/__tests__/setup.js'],
+        alias: {
+            '@shared': path.resolve(__dirname, '../shared'),
+            '@': path.resolve(__dirname, './src'),
+        },
+    },
 });
+

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-export function DiagnosticsPanel({ channelStats = [], rtt, retryCount, verifiedChunks, storageMode }) {
+export function DiagnosticsPanel({ channelStats = [], rtt, retryCount, verifiedChunks, storageMode, relayMode = false, stalled = false }) {
     const [expanded, setExpanded] = useState(false);
 
     const formatThroughput = (bytesPerSec) => {
@@ -37,8 +37,19 @@ export function DiagnosticsPanel({ channelStats = [], rtt, retryCount, verifiedC
 
             {expanded && (
                 <div className="px-6 pb-5 space-y-4" style={{ borderTop: '1px solid var(--border-color)' }}>
+                    {/* Transport mode banner — honest about whether data is P2P or server-relayed */}
+                    <div className="flex items-center gap-2 pt-4 text-xs" style={{ color: 'var(--text-muted)' }}>
+                        <span className="font-medium">Transport:</span>
+                        {relayMode ? (
+                            <span style={{ color: '#f59e0b' }}>Server relay (data passes through the LinkSpan server)</span>
+                        ) : (
+                            <span style={{ color: '#40c057' }}>Direct P2P (DTLS-encrypted DataChannel)</span>
+                        )}
+                        {stalled && <span style={{ color: '#ef4444' }}>· stalled, retrying…</span>}
+                    </div>
+
                     {/* Overview Stats */}
-                    <div className="grid grid-cols-3 gap-3 pt-4">
+                    <div className="grid grid-cols-3 gap-3">
                         <div className="stat-card text-center">
                             <div className="text-sm font-bold font-mono" style={{ color: 'var(--text-primary)' }}>
                                 {rtt !== null && rtt !== undefined ? `${(rtt * 1000).toFixed(0)}ms` : '--'}

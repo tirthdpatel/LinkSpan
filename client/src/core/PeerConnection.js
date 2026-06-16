@@ -5,11 +5,23 @@ import {
 } from '@shared/constants.js';
 
 /**
- * PeerConnection — Wraps RTCPeerConnection with ICE config and multi-channel setup.
+ * PeerConnection — Wraps RTCPeerConnection with ICE config, multi-channel setup,
+ * ICE restart, and browser sleep/wake detection.
+ *
+ * Improvements from v1:
+ * - restartIce(): creates a new offer with iceRestart: true
+ * - onfailed vs ondisconnected handled distinctly (failed needs ICE restart)
+ * - Browser sleep/tab suspend detection via visibilitychange + freeze events
+ * - On wakeup: triggers ICE restart to recover from stale connection
  */
 export class PeerConnection {
     /**
-     * @param {{ onIceCandidate: Function, onChannel: Function, onConnectionStateChange: Function }} callbacks
+     * @param {{
+     *   onIceCandidate: Function,
+     *   onChannel: Function,
+     *   onConnectionStateChange: Function,
+     *   onIceRestartRequired?: Function
+     * }} callbacks
      */
     constructor(callbacks) {
         this.callbacks = callbacks;
@@ -18,7 +30,11 @@ export class PeerConnection {
         /** @type {RTCDataChannel[]} */
         this.channels = [];
         this._iceServers = this._getIceServers();
+        this._sleepDetector = null;
+        this._lastSeen = Date.now();
     }
+
+    // ── Lifecycle ──────────────────────────────────────────────
 
     /**
      * Initialize the peer connection.
@@ -36,7 +52,16 @@ export class PeerConnection {
         };
 
         this.pc.onconnectionstatechange = () => {
-            this.callbacks.onConnectionStateChange(this.pc.connectionState);
+            const state = this.pc.connectionState;
+            this.callbacks.onConnectionStateChange(state);
+
+            if (state === 'failed') {
+                // Connection failed — attempt ICE restart
+                console.warn('[PeerConnection] Connection failed — attempting ICE restart');
+                this.restartIce().catch((err) => {
+                    console.error('[PeerConnection] ICE restart failed:', err);
+                });
+            }
         };
 
         this.pc.ondatachannel = (event) => {
@@ -44,10 +69,15 @@ export class PeerConnection {
             this.channels.push(event.channel);
             this.callbacks.onChannel(event.channel, this.channels.length - 1);
         };
+
+        // Browser sleep detection
+        this._startSleepDetection();
     }
 
+    // ── Channels ───────────────────────────────────────────────
+
     /**
-     * Create 7 data channels (sender-side).
+     * Create MAX_CHANNELS data channels (sender-side).
      * @param {Function} onChannelReady - called with (channel, index) when each channel opens
      */
     createChannels(onChannelReady) {
@@ -66,12 +96,15 @@ export class PeerConnection {
         }
     }
 
+    // ── SDP ────────────────────────────────────────────────────
+
     /**
      * Create an SDP offer.
+     * @param {{ iceRestart?: boolean }} [options]
      * @returns {Promise<RTCSessionDescriptionInit>}
      */
-    async createOffer() {
-        const offer = await this.pc.createOffer();
+    async createOffer(options = {}) {
+        const offer = await this.pc.createOffer(options);
         await this.pc.setLocalDescription(offer);
         return this.pc.localDescription.toJSON();
     }
@@ -106,8 +139,35 @@ export class PeerConnection {
         }
     }
 
+    // ── ICE Restart ────────────────────────────────────────────
+
+    /**
+     * Trigger an ICE restart to recover a degraded connection.
+     * Creates a new offer with iceRestart: true and notifies the caller.
+     * @returns {Promise<RTCSessionDescriptionInit>}
+     */
+    async restartIce() {
+        if (!this.pc) throw new Error('No peer connection');
+        const restartOffer = await this.createOffer({ iceRestart: true });
+        if (this.callbacks.onIceRestartRequired) {
+            this.callbacks.onIceRestartRequired(restartOffer);
+        }
+        return restartOffer;
+    }
+
+    // ── Stats ──────────────────────────────────────────────────
+
     /**
      * Get connection statistics.
+     *
+     * `transport` reflects how the P2P connection is actually routed, derived from
+     * the selected ICE candidate pair:
+     *   - 'direct'  — host/srflx candidates (true peer-to-peer, no relay)
+     *   - 'turn'    — at least one 'relay' candidate (data flows through a TURN server,
+     *                 still DTLS-encrypted end-to-end so the TURN server sees only ciphertext)
+     *   - null      — not yet established
+     *
+     * @returns {Promise<{ rtt: number|null, bytesReceived: number, bytesSent: number, transport: 'direct'|'turn'|null } | null>}
      */
     async getStats() {
         if (!this.pc) return null;
@@ -116,9 +176,18 @@ export class PeerConnection {
         let bytesReceived = 0;
         let bytesSent = 0;
 
+        // Resolve the selected candidate pair → candidate types to detect TURN relaying.
+        const candidates = new Map();
+        let selectedPair = null;
+
         stats.forEach((report) => {
             if (report.type === 'candidate-pair' && report.state === 'succeeded') {
                 rtt = report.currentRoundTripTime;
+                // `selected` (Firefox) or `nominated` (Chrome) marks the active pair.
+                if (report.selected || report.nominated) selectedPair = report;
+            }
+            if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                candidates.set(report.id, report.candidateType);
             }
             if (report.type === 'data-channel') {
                 bytesReceived += report.bytesReceived || 0;
@@ -126,17 +195,29 @@ export class PeerConnection {
             }
         });
 
-        return { rtt, bytesReceived, bytesSent };
+        let transport = null;
+        if (selectedPair) {
+            const localType = candidates.get(selectedPair.localCandidateId);
+            const remoteType = candidates.get(selectedPair.remoteCandidateId);
+            transport = (localType === 'relay' || remoteType === 'relay') ? 'turn' : 'direct';
+        }
+
+        return { rtt, bytesReceived, bytesSent, transport };
     }
 
+    // ── Cleanup ────────────────────────────────────────────────
+
     /**
-     * Close the connection.
+     * Close the connection and all channels.
      */
     close() {
+        this._stopSleepDetection();
+
         for (const ch of this.channels) {
             try { ch.close(); } catch { /* ignore */ }
         }
         this.channels = [];
+
         if (this.pc) {
             this.pc.close();
             this.pc = null;
@@ -156,7 +237,6 @@ export class PeerConnection {
             { urls: 'stun:stun1.l.google.com:19302' },
         ];
 
-        // Add Metered TURN servers if configured
         const turnDomain = import.meta.env.VITE_TURN_DOMAIN || 'global.relay.metered.ca';
         const turnUser = import.meta.env.VITE_TURN_USERNAME;
         const turnCred = import.meta.env.VITE_TURN_CREDENTIAL;
@@ -170,5 +250,58 @@ export class PeerConnection {
         }
 
         return servers;
+    }
+
+    /**
+     * Start browser sleep/wake detection.
+     * Uses visibilitychange (tab hidden/shown) and the freeze event (Chrome).
+     * On wake, triggers an ICE restart if the connection is degraded.
+     */
+    _startSleepDetection() {
+        this._lastSeen = Date.now();
+
+        // Heartbeat — if the gap between ticks is > 10s, the tab was suspended
+        this._sleepDetector = setInterval(() => {
+            const now = Date.now();
+            const gap = now - this._lastSeen;
+            this._lastSeen = now;
+
+            if (gap > 10_000 && this.pc?.connectionState === 'disconnected') {
+                console.warn('[PeerConnection] Browser wake detected — attempting ICE restart');
+                this.restartIce().catch(() => { /* handled by onConnectionStateChange */ });
+            }
+        }, 2000);
+
+        // Listen for visibility changes (tab switching)
+        if (typeof document !== 'undefined') {
+            this._onVisibilityChange = () => {
+                if (!document.hidden && this.pc?.connectionState === 'disconnected') {
+                    console.warn('[PeerConnection] Tab resumed — attempting ICE restart');
+                    this.restartIce().catch(() => { /* noop */ });
+                }
+            };
+            document.addEventListener('visibilitychange', this._onVisibilityChange);
+
+            // Chrome freeze/resume lifecycle events
+            this._onResume = () => {
+                this.restartIce().catch(() => { /* noop */ });
+            };
+            document.addEventListener('resume', this._onResume);
+        }
+    }
+
+    _stopSleepDetection() {
+        if (this._sleepDetector) {
+            clearInterval(this._sleepDetector);
+            this._sleepDetector = null;
+        }
+        if (typeof document !== 'undefined') {
+            if (this._onVisibilityChange) {
+                document.removeEventListener('visibilitychange', this._onVisibilityChange);
+            }
+            if (this._onResume) {
+                document.removeEventListener('resume', this._onResume);
+            }
+        }
     }
 }

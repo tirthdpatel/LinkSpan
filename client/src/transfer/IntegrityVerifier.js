@@ -64,6 +64,20 @@ export class IntegrityVerifier {
     }
 
     /**
+     * Get all recorded chunk hashes ordered by index (0..totalChunks-1).
+     * Used to compute the whole-file manifest root. Missing entries become ''.
+     * @param {number} totalChunks
+     * @returns {string[]}
+     */
+    getOrderedHashes(totalChunks) {
+        const ordered = new Array(totalChunks);
+        for (let i = 0; i < totalChunks; i++) {
+            ordered[i] = this.chunkHashes.get(i) || '';
+        }
+        return ordered;
+    }
+
+    /**
      * Verify a full file blob against an expected hash.
      * @param {Blob} blob
      * @param {string} expectedHash

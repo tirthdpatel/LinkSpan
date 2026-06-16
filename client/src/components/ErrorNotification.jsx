@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 
-export function ErrorNotification({ error, onDismiss }) {
+export function ErrorNotification({ error, onDismiss, ...rest }) {
     const [visible, setVisible] = useState(true);
 
     useEffect(() => {
@@ -15,8 +15,10 @@ export function ErrorNotification({ error, onDismiss }) {
 
     return (
         <div
+            role="alert"
             className={`fixed top-4 right-4 z-50 max-w-sm transition-all duration-300 ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'
                 }`}
+            {...rest}
         >
             <div className="glass-card p-4 flex items-start gap-3"
                 style={{ borderColor: 'rgba(250, 82, 82, 0.3)', boxShadow: '0 4px 24px rgba(250, 82, 82, 0.15)' }}>

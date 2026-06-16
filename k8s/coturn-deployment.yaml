@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkspan-coturn
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+    app.kubernetes.io/component: coturn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linkspan-coturn
+  template:
+    metadata:
+      labels:
+        app: linkspan-coturn
+        app.kubernetes.io/component: coturn
+    spec:
+      # hostNetwork is REQUIRED for TURN: coturn must observe real client source IPs (not
+      # a NAT/CNI address) to allocate working relays. Trivy AVD-KSV-0009 is suppressed
+      # (path-scoped) in .trivyignore.yaml.
+      hostNetwork: true   # Required for TURN — coturn needs real source IPs
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534    # nobody — TURN ports (3478/5349) are >1024, no privilege needed
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: coturn
+          image: coturn/coturn:alpine
+          args:
+            - -c
+            - /etc/turnserver.conf
+          # hostPort is REQUIRED for TURN: clients connect to the well-known TURN ports
+          # (3478/5349) on the node's real IP; these can't sit behind a cluster Service/NAT
+          # for relay allocation to work. Trivy AVD-KSV-0024 is suppressed in .trivyignore.yaml.
+          ports:
+            - name: turn-udp
+              containerPort: 3478
+              protocol: UDP
+              hostPort: 3478
+            - name: turn-tcp
+              containerPort: 3478
+              protocol: TCP
+              hostPort: 3478
+            - name: turns-tls
+              containerPort: 5349
+              protocol: TCP
+              hostPort: 5349
+            - name: turns-dtls
+              containerPort: 5349
+              protocol: UDP
+              hostPort: 5349
+          env:
+            - name: TURN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: linkspan-secrets
+                  key: TURN_SECRET
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: coturn-config
+              mountPath: /etc/turnserver.conf
+              subPath: turnserver.conf
+              readOnly: true
+            - name: tls-certs
+              mountPath: /etc/tls
+              readOnly: true
+            # Writable scratch under a read-only root (shared-secret auth → no DB writes).
+            - name: tmp
+              mountPath: /tmp
+            - name: var-tmp
+              mountPath: /var/tmp
+            - name: run
+              mountPath: /var/run
+          livenessProbe:
+            tcpSocket:
+              port: 3478
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: coturn-config
+          configMap:
+            name: coturn-config
+        - name: tls-certs
+          secret:
+            secretName: linkspan-tls
+        - name: tmp
+          emptyDir: {}
+        - name: var-tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coturn-config
+  namespace: linkspan
+data:
+  turnserver.conf: |
+    # Coturn configuration for Kubernetes
+    # Real config is in coturn/turnserver.conf — this is the k8s overlay
+    listening-port=3478
+    tls-listening-port=5349
+    realm=turn.linkspan.app
+    server-name=turn.linkspan.app
+
+    # Use environment variable for secret
+    use-auth-secret
+    # static-auth-secret is set via env in production
+
+    # Rate limits
+    user-quota=10
+    total-quota=100
+    max-bps=1000000000  # 1 Gbps
+
+    # Relay IP ranges (allow only RFC 1918 relay)
+    no-multicast-peers
+    no-loopback-peers
+    denied-peer-ip=0.0.0.0-0.255.255.255
+    denied-peer-ip=100.64.0.0-100.127.255.255
+    denied-peer-ip=127.0.0.0-127.255.255.255
+    denied-peer-ip=169.254.0.0-169.254.255.255
+    denied-peer-ip=192.0.0.0-192.0.0.255
+    denied-peer-ip=240.0.0.0-255.255.255.255
+
+    # Logging
+    log-file=stdout
+    no-stdout-log
+    syslog
+
+    # TLS
+    cert=/etc/tls/tls.crt
+    pkey=/etc/tls/tls.key

@@ -1,0 +1,162 @@
+# Disaster-recovery backups (audit Phase 9 gap: no DB/blob backups existed).
+#
+# Two CronJobs write into a shared backup PVC:
+#   1. postgres-backup — nightly pg_dump of the audit/analytics DB (gzip, timestamped).
+#   2. blobs-backup    — nightly tar of the share-link blob volume.
+#
+# Both keep a rolling 14-day window (older files are pruned). For real durability, sync the
+# backup PVC off-cluster to object storage (S3/GCS) — a sidecar or a third CronJob running
+# `aws s3 sync`/`gcloud storage rsync` against /backups. Restore is documented inline below.
+#
+# This is a template: set storageClassName / size to your cluster and verify restores
+# periodically (an untested backup is not a backup).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linkspan-backups
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteMany   # so both the blob volume and backup jobs can mount it; RWO works if you run jobs serially on one node
+  resources:
+    requests:
+      storage: 100Gi
+  # storageClassName: nfs
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: linkspan-postgres-backup
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "0 3 * * *"            # 03:00 daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            fsGroup: 999
+          containers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              env:
+                - name: PGHOST
+                  value: postgres
+                - name: PGUSER
+                  value: linkspan
+                - name: PGDATABASE
+                  value: linkspan
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: linkspan-secrets
+                      key: POSTGRES_PASSWORD
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/backups/postgres/linkspan-$ts.sql.gz"
+                  mkdir -p /backups/postgres
+                  echo "Dumping to $out"
+                  pg_dump --no-owner --no-privileges | gzip -9 > "$out"
+                  # Prune backups older than 14 days.
+                  find /backups/postgres -name 'linkspan-*.sql.gz' -mtime +14 -delete
+                  echo "Done. Current backups:"; ls -lh /backups/postgres
+                  # Restore:  gunzip -c linkspan-<ts>.sql.gz | psql -h postgres -U linkspan -d linkspan
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: linkspan-backups
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: linkspan-blobs-backup
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "30 3 * * *"          # 03:30 daily (after the DB dump)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001    # match the signaling writer so blob files are readable
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: blob-tar
+              image: alpine:3.20
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/backups/blobs/blobs-$ts.tar.gz"
+                  mkdir -p /backups/blobs
+                  echo "Archiving /data/blobs to $out"
+                  tar -czf "$out" -C /data/blobs . || { echo "tar failed"; exit 1; }
+                  find /backups/blobs -name 'blobs-*.tar.gz' -mtime +14 -delete
+                  echo "Done. Current backups:"; ls -lh /backups/blobs
+                  # Restore:  tar -xzf blobs-<ts>.tar.gz -C /data/blobs
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: blobs
+                  mountPath: /data/blobs
+                  readOnly: true
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: blobs
+              persistentVolumeClaim:
+                claimName: linkspan-blobs
+            - name: backups
+              persistentVolumeClaim:
+                claimName: linkspan-backups
+            - name: tmp
+              emptyDir: {}
