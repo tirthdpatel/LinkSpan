@@ -1,0 +1,27 @@
+# Share-link blob storage (Features 14/15).
+#
+# IMPORTANT: the signaling Deployment runs multiple replicas, so every pod must see the
+# same blobs. This PVC therefore requests ReadWriteMany (RWX) — back it with a storage
+# class that supports RWX (NFS, AWS EFS, Azure Files, CephFS, GCP Filestore).
+#
+# Don't have RWX? Two options:
+#   1. Run a single signaling replica with a ReadWriteOnce volume (no horizontal scale).
+#   2. Implement a cloud object StorageBackend (S3/GCS) and set SHARE_STORAGE accordingly;
+#      then this PVC is unnecessary.
+#
+# Metadata is already shared across pods via Redis, independent of blob storage.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linkspan-blobs
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+    app.kubernetes.io/component: blob-storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  # storageClassName: nfs   # set to your RWX-capable storage class

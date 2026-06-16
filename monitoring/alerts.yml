@@ -1,0 +1,64 @@
+groups:
+  - name: linkspan-signaling
+    rules:
+      # ── Availability ──────────────────────────────────────────
+      - alert: SignalingServerDown
+        expr: up{job="linkspan-signaling"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LinkSpan signaling server is down"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for over 1 minute."
+
+      # ── Transfer reliability ──────────────────────────────────
+      - alert: HighTransferFailureRate
+        # More than 0.2 transfer failures/sec sustained over 10m.
+        expr: sum(rate(linkspan_transfer_failures_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated transfer failure rate"
+          description: "Transfer failures are averaging {{ printf \"%.2f\" $value }}/s over the last 5m."
+
+      - alert: RelayActivationSurge
+        # P2P normally succeeds; a surge of relay activations means many peers
+        # are failing to establish a direct connection (TURN/NAT issues).
+        expr: sum(rate(linkspan_relay_activations_total[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Surge in server-relay fallbacks"
+          description: "Relay activations at {{ printf \"%.2f\" $value }}/s — direct P2P may be broadly failing."
+
+      - alert: ICERestartStorm
+        expr: sum(rate(linkspan_ice_restart_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High rate of ICE restarts"
+          description: "ICE restarts at {{ printf \"%.2f\" $value }}/s indicate unstable connectivity."
+
+      # ── Abuse / DoS ───────────────────────────────────────────
+      - alert: RateLimitSpike
+        # A sustained spike in rate-limit hits suggests abuse or a misbehaving client.
+        expr: sum(rate(linkspan_rate_limit_hits_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spike in rate-limit hits"
+          description: "Rate-limit hits at {{ printf \"%.2f\" $value }}/s — possible abuse or DoS."
+
+      # ── Capacity ──────────────────────────────────────────────
+      - alert: ActiveSessionsHigh
+        expr: sum(linkspan_active_sessions) > 5000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active session count is high"
+          description: "{{ $value }} active sessions — consider scaling out the signaling tier."

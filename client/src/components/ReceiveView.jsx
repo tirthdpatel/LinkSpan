@@ -1,27 +1,51 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { parseDeepLink } from '../core/DeepLink';
 
-export function ReceiveView({ connectionState, onSubmitCode, onBack }) {
+export function ReceiveView({
+    connectionState,
+    onSubmitCode,
+    onBack,
+    destinationSupported = false,
+    onChooseDestination,
+    onClearDestination,
+}) {
     const [code, setCode] = useState(['', '', '', '', '', '']);
     const [useScanner, setUseScanner] = useState(false);
+    const [destination, setDestination] = useState(null);
     const inputRefs = useRef([]);
     const scannerRef = useRef(null);
     const scannerInstanceRef = useRef(null);
+
+    const pickDestination = async () => {
+        const name = await onChooseDestination?.(false);
+        if (name) setDestination(name);
+    };
+    const resetDestination = () => {
+        onClearDestination?.();
+        setDestination(null);
+    };
 
     useEffect(() => {
         // Focus first input on mount
         inputRefs.current[0]?.focus();
     }, []);
 
+    const [expiredLink, setExpiredLink] = useState(false);
+
     useEffect(() => {
-        // Check URL params for code (from QR code link)
-        const params = new URLSearchParams(window.location.search);
-        const urlCode = params.get('code');
-        if (urlCode && urlCode.length === 6) {
-            const digits = urlCode.split('');
-            setCode(digits);
-            onSubmitCode(urlCode);
-            // Clean URL
+        // Parse a deep link from the URL (from a QR scan or shared link, Feature 13).
+        // Honors the expiring token: an expired link is rejected with a hint instead
+        // of auto-joining a dead session.
+        const link = parseDeepLink(window.location.href);
+        if (link.ok && link.code) {
+            // Clean the URL regardless so a refresh doesn't re-trigger.
             window.history.replaceState({}, document.title, window.location.pathname);
+            if (link.expired) {
+                setExpiredLink(true);
+                return;
+            }
+            setCode(link.code.split(''));
+            onSubmitCode(link.code);
         }
     }, []);
 
@@ -69,18 +93,19 @@ export function ReceiveView({ connectionState, onSubmitCode, onBack }) {
                 { facingMode: 'environment' },
                 { fps: 10, qrbox: { width: 250, height: 250 } },
                 (decodedText) => {
-                    // Extract code from URL or raw code
-                    let extractedCode = decodedText;
-                    try {
-                        const url = new URL(decodedText);
-                        extractedCode = url.searchParams.get('code') || decodedText;
-                    } catch { /* not a URL */ }
-
-                    if (/^\d{6}$/.test(extractedCode)) {
+                    // Parse the scanned QR as a deep link (URL or raw code), honoring
+                    // the expiring token so a stale QR can't auto-join (Feature 13).
+                    const link = parseDeepLink(decodedText);
+                    if (!link.ok || !link.code) return;
+                    if (link.expired) {
                         scanner.stop().catch(() => { });
-                        setCode(extractedCode.split(''));
-                        onSubmitCode(extractedCode);
+                        setUseScanner(false);
+                        setExpiredLink(true);
+                        return;
                     }
+                    scanner.stop().catch(() => { });
+                    setCode(link.code.split(''));
+                    onSubmitCode(link.code);
                 },
                 () => { } // QR scan error (expected on each non-QR frame)
             );
@@ -109,11 +134,25 @@ export function ReceiveView({ connectionState, onSubmitCode, onBack }) {
 
             <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Receive a File</h2>
 
+            {expiredLink && (
+                <div
+                    className="glass-card p-4 text-sm text-center"
+                    style={{ color: 'var(--danger, #e03131)' }}
+                    data-testid="link-expired"
+                >
+                    That QR / link has expired. Ask the sender for a new code.
+                </div>
+            )}
+
             {/* Manual Code Entry */}
             <div className="glass-card p-6 space-y-4">
                 <p className="text-sm font-medium text-center" style={{ color: 'var(--text-muted)' }}>Enter the 6-digit pairing code</p>
 
-                <div className="flex items-center justify-center gap-2" onPaste={handlePaste}>
+                <div
+                    className="flex items-center justify-center gap-2"
+                    onPaste={handlePaste}
+                    data-testid="pairing-input"
+                >
                     {code.map((digit, i) => (
                         <input
                             key={i}
@@ -136,6 +175,19 @@ export function ReceiveView({ connectionState, onSubmitCode, onBack }) {
                     ))}
                 </div>
 
+                {/* Manual submit button for E2E test targeting and keyboard users */}
+                <button
+                    data-testid="join-button"
+                    onClick={() => {
+                        const full = code.join('');
+                        if (full.length === 6) onSubmitCode(full);
+                    }}
+                    className="btn-primary w-full"
+                    disabled={code.join('').length !== 6}
+                >
+                    Join Session
+                </button>
+
                 {/* Connection Status */}
                 {connectionState !== 'disconnected' && (
                     <div className="flex items-center justify-center gap-2 pt-2">
@@ -150,6 +202,27 @@ export function ReceiveView({ connectionState, onSubmitCode, onBack }) {
                     </div>
                 )}
             </div>
+
+            {/* Download location (Feature 5) — only where the API exists */}
+            {destinationSupported && (
+                <div className="glass-card p-4 flex items-center gap-3" data-testid="destination-picker">
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Save to</p>
+                        <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }} data-testid="destination-label">
+                            {destination ? `📁 ${destination}` : 'Downloads (default) — choose a folder to keep structure'}
+                        </p>
+                    </div>
+                    {destination ? (
+                        <button type="button" onClick={resetDestination} className="btn-secondary text-sm" data-testid="destination-clear">
+                            Reset
+                        </button>
+                    ) : (
+                        <button type="button" onClick={pickDestination} className="btn-secondary text-sm" data-testid="destination-choose">
+                            Choose folder
+                        </button>
+                    )}
+                </div>
+            )}
 
             {/* QR Scanner */}
             <div className="text-center">

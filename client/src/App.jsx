@@ -4,311 +4,280 @@ import { SendView } from './components/SendView';
 import { ReceiveView } from './components/ReceiveView';
 import { TransferProgress } from './components/TransferProgress';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { ConnectionMode } from './components/ConnectionMode';
+import { SasVerification } from './components/SasVerification';
+import { ReceiveConfirmation } from './components/ReceiveConfirmation';
+import { TextPreview } from './components/TextPreview';
+import { LinkPreview } from './components/LinkPreview';
+import { HistoryView } from './components/HistoryView';
+import { ContactsView } from './components/ContactsView';
+import { RoomView } from './components/RoomView';
+import { ShareLinkView } from './components/ShareLinkView';
+import { parseShareViewerUrl } from './share/ShareLinkClient.js';
 import { ErrorNotification } from './components/ErrorNotification';
 import { SolarSystem } from './components/SolarSystem';
 import { InteractiveCard, GlowIcon } from './components/InteractiveElements';
-import { SignalingClient } from './core/SignalingClient';
-import { PeerConnection } from './core/PeerConnection';
-import { ChannelManager } from './core/ChannelManager';
-import { Sender } from './transfer/Sender';
-import { Receiver } from './transfer/Receiver';
-import { StorageManager } from './storage/StorageManager';
-import { ResumeManager } from './storage/ResumeManager';
-import { TRANSFER_MSG } from '@shared/constants.js';
+import { useConnection } from './hooks/useConnection';
+import { extractText } from './transfer/TextPayload';
+import { parseLinkPayload, extractLinkText } from './transfer/LinkPayload';
+import { TRANSFER_STATE, TRANSFER_TYPE } from '@shared/constants.js';
 
-const SIGNALING_URL = import.meta.env.VITE_SIGNALING_URL || 'ws://localhost:10000';
+// ── Initial State ──────────────────────────────────────────────
+const INITIAL_PROGRESS = {
+    sentChunks: 0,
+    totalChunks: 0,
+    speed: 0,
+    role: null,
+    fileName: '',
+    fileSize: 0,
+    complete: false,
+    paused: false,
+    cancelled: false,
+    // Batch/folder transfer aggregate fields
+    totalFiles: 0,
+    currentFileIndex: 0,
+    batchTotalBytes: 0,
+    batchBytesSent: 0,
+    batchBytesReceived: 0,
+};
+
+const INITIAL_DIAGNOSTICS = {
+    channelStats: [],
+    rtt: null,
+    retryCount: 0,
+    verifiedChunks: 0,
+    storageMode: '',
+    stalled: false,
+    relayMode: false,
+    transport: null, // 'direct' | 'turn' | null — how the P2P connection is routed
+    encrypted: false, // true once the ECDH session key is agreed (app-layer E2E)
+};
 
 export default function App() {
+    // ── Theme ─────────────────────────────────────────────────
     const [darkMode, setDarkMode] = useState(() => {
         if (typeof window !== 'undefined') {
-            return localStorage.getItem('linkspan-dark') === 'true' ||
-                window.matchMedia('(prefers-color-scheme: dark)').matches;
+            return (
+                localStorage.getItem('linkspan-dark') === 'true' ||
+                window.matchMedia('(prefers-color-scheme: dark)').matches
+            );
         }
         return false;
     });
 
-    const [view, setView] = useState('home'); // home | send | receive | transferring
+    // ── UI State ─────────────────────────────────────────────
+    const [view, setView] = useState('home'); // home | send | receive | transferring | sharelink-create | sharelink-receive
+    // When the page is opened as a share link (?s=<id>#k=<key>), hold the parsed reference.
+    const [shareRef, setShareRef] = useState(null);
     const [pairingCode, setPairingCode] = useState('');
     const [sessionId, setSessionId] = useState('');
-    const [connectionState, setConnectionState] = useState('disconnected');
+    const [transferState, setTransferState] = useState(TRANSFER_STATE.IDLE);
     const [error, setError] = useState(null);
+    const [transferProgress, setTransferProgress] = useState(INITIAL_PROGRESS);
+    const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
+    const [currentFileIndex, setCurrentFileIndex] = useState(0);
+    // Short Authentication String pending user verification (null when none).
+    const [sasCode, setSasCode] = useState(null);
+    // Pending incoming-transfer approval request (Feature 4); null when none.
+    const [receiveRequest, setReceiveRequest] = useState(null);
+    // Received text payload awaiting preview (Feature 7); null when none.
+    const [textPreview, setTextPreview] = useState(null);
+    // Received link payload awaiting preview (Feature 9); null when none.
+    const [linkPreview, setLinkPreview] = useState(null);
+    // History panel visibility (Feature 6).
+    const [showHistory, setShowHistory] = useState(false);
+    // Contacts/saved-devices panel visibility (Feature 11).
+    const [showContacts, setShowContacts] = useState(false);
+    const [showRoom, setShowRoom] = useState(false);
 
-    // Transfer state
-    const [transferProgress, setTransferProgress] = useState({
-        sentChunks: 0,
-        totalChunks: 0,
-        speed: 0,
-        role: null, // 'sender' | 'receiver'
-        fileName: '',
-        fileSize: 0,
-        complete: false,
-    });
+    // Completed transfer — for download trigger
+    const [completedBlob, setCompletedBlob] = useState(null);
+    const [completedFileName, setCompletedFileName] = useState('');
 
-    // Diagnostics
-    const [diagnostics, setDiagnostics] = useState({
-        channelStats: [],
-        rtt: null,
-        retryCount: 0,
-        verifiedChunks: 0,
-        storageMode: '',
-    });
-
-    // Refs for engine instances
-    const signalingRef = useRef(null);
-    const peerRef = useRef(null);
-    const channelManagerRef = useRef(null);
-    const senderRef = useRef(null);
-    const receiverRef = useRef(null);
-    const storageManagerRef = useRef(null);
-    const resumeManagerRef = useRef(null);
     const diagIntervalRef = useRef(null);
 
-    // Toggle dark mode
+    // ── Connection Hook ───────────────────────────────────────
+    // All protocol/session/transfer logic lives here.
+    // App.jsx is purely a UI coordinator.
+    const {
+        cleanup,
+        handleSendFile: _handleSendFile,
+        handleReceive: _handleReceive,
+        handlePause,
+        handleResume,
+        handleCancel: _handleCancel,
+        confirmSas,
+        rejectSas,
+        acceptReceive,
+        declineReceive,
+        chooseDestination,
+        clearDestination,
+        destinationSupported,
+        history,
+        remembered,
+        getDiagnosticSnapshot,
+        channelManagerRef,
+        peerRef,
+    } = useConnection({
+        setTransferState,
+        setTransferProgress,
+        setDiagnostics,
+        setError,
+        setPairingCode,
+        setSessionId,
+        setView,
+        setCurrentFileIndex,
+        setSasCode,
+        setReceiveRequest,
+        onTransferComplete: async (blob, fileName, info = {}) => {
+            // Text payloads open a preview (copy / save) instead of downloading.
+            if (info.transferType === TRANSFER_TYPE.TEXT && blob) {
+                try {
+                    const text = await extractText(blob);
+                    setTextPreview({ text, format: info.textFormat, fileName });
+                    return;
+                } catch { /* fall through to download */ }
+            }
+            // Link payloads open a link preview (open / copy) instead of downloading.
+            if (info.transferType === TRANSFER_TYPE.LINK && blob) {
+                try {
+                    const link = parseLinkPayload(await extractLinkText(blob));
+                    if (link) { setLinkPreview(link); return; }
+                } catch { /* fall through to download */ }
+            }
+            // Written straight to the chosen folder (Feature 5) — nothing to download.
+            if (info.writtenToDisk || !blob) return;
+            setCompletedBlob(blob);
+            setCompletedFileName(fileName);
+        },
+    });
+
+    // ── Effects ───────────────────────────────────────────────
+
     useEffect(() => {
         document.documentElement.classList.toggle('dark', darkMode);
         localStorage.setItem('linkspan-dark', darkMode);
     }, [darkMode]);
 
-    // Diagnostics polling
+    // Opened as a share link? Switch to the receive-share view. Runs once on mount.
+    useEffect(() => {
+        const ref = parseShareViewerUrl();
+        if (ref) { setShareRef(ref); setView('sharelink-receive'); }
+    }, []);
+
+    // Trigger file download when a transfer completes
+    useEffect(() => {
+        if (completedBlob) {
+            downloadBlob(completedBlob, completedFileName);
+            setCompletedBlob(null);
+        }
+    }, [completedBlob, completedFileName]);
+
+    // Diagnostics polling — only active during transfers
     useEffect(() => {
         if (view === 'transferring') {
             diagIntervalRef.current = setInterval(async () => {
-                const cm = channelManagerRef.current;
-                const pc = peerRef.current;
-                if (cm && pc) {
-                    const channelStats = cm.getChannelStats();
-                    const pcStats = await pc.getStats();
+                const snap = await getDiagnosticSnapshot();
+                if (snap) {
                     setDiagnostics((prev) => ({
                         ...prev,
-                        channelStats,
-                        rtt: pcStats?.rtt,
+                        channelStats: snap.channelStats,
+                        rtt: snap.rtt ?? prev.rtt,
+                        transport: snap.transport ?? prev.transport,
                     }));
-                    cm.resetStats();
+                    channelManagerRef.current?.resetStats();
                 }
             }, 1000);
         }
         return () => {
             if (diagIntervalRef.current) clearInterval(diagIntervalRef.current);
         };
-    }, [view]);
+    }, [view, getDiagnosticSnapshot, channelManagerRef]);
 
     // Cleanup on unmount
     useEffect(() => {
         return () => cleanup();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    const cleanup = () => {
-        if (diagIntervalRef.current) clearInterval(diagIntervalRef.current);
-        senderRef.current?.stop();
-        receiverRef.current?.stop();
-        channelManagerRef.current?.closeAll();
-        peerRef.current?.close();
-        signalingRef.current?.disconnect();
-    };
+    // ── Action Wrappers ───────────────────────────────────────
 
-    // ── Initialize Signaling + Peer Connection ────────────────
-
-    const initConnection = useCallback(async (role, code = null) => {
-        try {
-            setConnectionState('connecting');
-            setError(null);
-
-            const signaling = new SignalingClient(SIGNALING_URL);
-            signalingRef.current = signaling;
-
-            const channelManager = new ChannelManager();
-            channelManagerRef.current = channelManager;
-
-            const peer = new PeerConnection({
-                onIceCandidate: (candidate) => signaling.sendIceCandidate(candidate),
-                onChannel: () => { },
-                onConnectionStateChange: (state) => {
-                    setConnectionState(state);
-                    if (state === 'failed' || state === 'disconnected') {
-                        setError({ message: 'Peer connection lost. Refresh to retry.' });
-                    }
-                },
-            });
-            peerRef.current = peer;
-            peer.init();
-
-            // Setup signaling handlers
-            signaling.on('session-created', (data) => {
-                setSessionId(data.sessionId);
-                if (data.pairingCode) {
-                    setPairingCode(data.pairingCode);
-                }
-            });
-
-            signaling.on('peer-joined', async () => {
-                // Sender creates the offer when peer joins
-                if (role === 'sender') {
-                    peer.createChannels((ch, i) => {
-                        if (i === 0) {
-                            // All channels use negotiated IDs, so they open on both sides
-                        }
-                    });
-                    channelManager.setChannels(peer.channels);
-
-                    const offer = await peer.createOffer();
-                    signaling.sendOffer(offer);
-                }
-            });
-
-            signaling.on('offer', async (offer) => {
-                await peer.setRemoteDescription(offer);
-                // Receiver creates channels (negotiated, same IDs)
-                peer.createChannels(() => { });
-                channelManager.setChannels(peer.channels);
-
-                const answer = await peer.createAnswer();
-                signaling.sendAnswer(answer);
-            });
-
-            signaling.on('answer', async (answer) => {
-                await peer.setRemoteDescription(answer);
-            });
-
-            signaling.on('ice-candidate', async (candidate) => {
-                await peer.addIceCandidate(candidate);
-            });
-
-            signaling.on('error', (err) => {
-                setError(err);
-                setConnectionState('disconnected');
-            });
-
-            signaling.on('session-closed', () => {
-                setError({ message: 'Session closed by the other peer.' });
-                setConnectionState('disconnected');
-            });
-
-            signaling.on('disconnected', () => {
-                if (connectionState !== 'connected') {
-                    setConnectionState('reconnecting');
-                }
-            });
-
-            // Connect
-            await signaling.connect();
-
-            if (role === 'sender') {
-                signaling.createSession();
-            } else {
-                signaling.joinSession(code);
-            }
-        } catch (err) {
-            setError({ message: err.message || 'Failed to connect.' });
-            setConnectionState('disconnected');
-        }
-    }, []);
-
-    // ── Send File ─────────────────────────────────────────────
-
-    const handleSendFile = useCallback(async (file) => {
-        setView('send');
-        await initConnection('sender');
-
-        // Wait for channels to be ready, then start sender
-        const waitForChannels = setInterval(() => {
-            const cm = channelManagerRef.current;
-            if (cm && cm.getReadyCount() >= 1) {
-                clearInterval(waitForChannels);
-
-                const sender = new Sender(file, cm, (sent, total, speed) => {
-                    setTransferProgress({
-                        sentChunks: sent,
-                        totalChunks: total,
-                        speed,
-                        role: 'sender',
-                        fileName: file.name,
-                        fileSize: file.size,
-                        complete: sent === total,
-                    });
-                });
-                senderRef.current = sender;
-
-                // Send file metadata via first channel
-                const meta = sender.getFileMeta();
-                const metaMsg = JSON.stringify({ type: TRANSFER_MSG.FILE_META, ...meta });
-                cm.send(0, metaMsg).then(() => {
-                    sender.start();
-                    setView('transferring');
-                    setTransferProgress((prev) => ({
-                        ...prev,
-                        totalChunks: meta.totalChunks,
-                        fileName: file.name,
-                        fileSize: file.size,
-                        role: 'sender',
-                    }));
-                });
-            }
-        }, 200);
-    }, [initConnection]);
-
-    // ── Receive File ──────────────────────────────────────────
+    // Accepts a batch descriptor (see FileTree.buildBatch): { files, directories,
+    // totalFiles, totalBytes, name }. SendView builds it from the file/folder input
+    // or a drag-and-drop, so App stays a pure coordinator.
+    const handleSendFile = useCallback(async (batch, sendOptions = {}) => {
+        setCurrentFileIndex(0);
+        setTransferProgress({ ...INITIAL_PROGRESS, totalFiles: batch.totalFiles });
+        setDiagnostics(INITIAL_DIAGNOSTICS);
+        await _handleSendFile(batch, sendOptions);
+    }, [_handleSendFile]);
 
     const handleReceive = useCallback(async (code) => {
-        setView('receive');
-        await initConnection('receiver', code);
+        setTransferProgress(INITIAL_PROGRESS);
+        setDiagnostics(INITIAL_DIAGNOSTICS);
+        await _handleReceive(code);
+    }, [_handleReceive]);
 
-        const cm = channelManagerRef.current;
-        const storage = new StorageManager();
-        storageManagerRef.current = storage;
-        const resume = new ResumeManager();
-        resumeManagerRef.current = resume;
+    const handleCancel = useCallback(() => {
+        _handleCancel();
+        setTimeout(() => setView('home'), 2000);
+    }, [_handleCancel]);
 
-        setDiagnostics((prev) => ({ ...prev, storageMode: storage.getMode() }));
+    const handleBack = useCallback(() => {
+        cleanup();
+        setView('home');
+        setPairingCode('');
+        setTransferState(TRANSFER_STATE.IDLE);
+        setError(null);
+        setTransferProgress(INITIAL_PROGRESS);
+        setDiagnostics(INITIAL_DIAGNOSTICS);
+        setReceiveRequest(null);
+        setTextPreview(null);
+        setLinkPreview(null);
+    }, [cleanup]);
 
-        // Wait for file metadata from sender
-        const waitForMeta = setInterval(() => {
-            if (cm && cm.isConnected()) {
-                clearInterval(waitForMeta);
+    // Feature 4 — receive-approval decisions.
+    const handleAcceptReceive = useCallback((remember) => {
+        acceptReceive(remember);
+    }, [acceptReceive]);
 
-                cm.onMessage(async (rawData) => {
-                    if (typeof rawData === 'string') {
-                        try {
-                            const msg = JSON.parse(rawData);
-                            if (msg.type === TRANSFER_MSG.FILE_META) {
-                                // Got file meta — start receiver
-                                const receiver = new Receiver(
-                                    msg,
-                                    cm,
-                                    storage,
-                                    (received, total, speed) => {
-                                        setTransferProgress({
-                                            sentChunks: received,
-                                            totalChunks: total,
-                                            speed,
-                                            role: 'receiver',
-                                            fileName: msg.fileName,
-                                            fileSize: msg.fileSize,
-                                            complete: received === total,
-                                        });
-                                        resume.markChunkReceived(msg.fileId, received - 1);
-                                    },
-                                    async (blob) => {
-                                        // Transfer complete — trigger download
-                                        downloadBlob(blob, msg.fileName);
-                                        setTransferProgress((prev) => ({ ...prev, complete: true }));
-                                        await resume.clear(msg.fileId);
-                                    },
-                                    (err) => {
-                                        setError({ message: err.message });
-                                    }
-                                );
-                                receiverRef.current = receiver;
-                                await receiver.start();
-                                setView('transferring');
-                            }
-                        } catch { /* not JSON */ }
-                    }
-                });
-            }
-        }, 200);
-    }, [initConnection]);
+    const handleDeclineReceive = useCallback(() => {
+        declineReceive();
+        setView('home');
+        setPairingCode('');
+        setTransferState(TRANSFER_STATE.IDLE);
+    }, [declineReceive]);
+
+    const handleTextDone = useCallback(() => {
+        setTextPreview(null);
+        setView('home');
+        setTransferState(TRANSFER_STATE.IDLE);
+    }, []);
+
+    const handleLinkDone = useCallback(() => {
+        setLinkPreview(null);
+        setView('home');
+        setTransferState(TRANSFER_STATE.IDLE);
+    }, []);
+
+    // User reported the security codes don't match — abort and return home.
+    const handleSasReject = useCallback(() => {
+        rejectSas();
+        setError({ message: 'Security code did not match — transfer aborted for your safety.' });
+        setView('home');
+        setPairingCode('');
+        setTransferState(TRANSFER_STATE.IDLE);
+    }, [rejectSas]);
 
     // ── Download Helper ───────────────────────────────────────
+
+    const formatBytes = (bytes) => {
+        if (!bytes || bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+    };
 
     const downloadBlob = (blob, fileName) => {
         const url = URL.createObjectURL(blob);
@@ -321,14 +290,43 @@ export default function App() {
         URL.revokeObjectURL(url);
     };
 
+    // ── Derived State ─────────────────────────────────────────
+
+    const isTransferring =
+        transferState === TRANSFER_STATE.TRANSFERRING ||
+        transferState === TRANSFER_STATE.RESUMING;
+
+    const isPeerConnected =
+        transferState === TRANSFER_STATE.CONNECTED ||
+        transferState === TRANSFER_STATE.TRANSFERRING ||
+        transferState === TRANSFER_STATE.RESUMING;
+
+    const isTransferComplete = transferProgress.complete;
+
+    // Overall batch byte progress (sender uses batchBytesSent, receiver batchBytesReceived).
+    const batchBytesDone = transferProgress.role === 'receiver'
+        ? (transferProgress.batchBytesReceived || 0)
+        : (transferProgress.batchBytesSent || 0);
+    const batchPercent = transferProgress.batchTotalBytes > 0
+        ? Math.min(100, Math.round((batchBytesDone / transferProgress.batchTotalBytes) * 100))
+        : 0;
+
     // ── Render ────────────────────────────────────────────────
 
     return (
-        <div className="min-h-screen flex flex-col relative" style={{ background: 'var(--bg-primary)' }}>
+        <div
+            className="min-h-screen flex flex-col relative"
+            style={{ background: 'var(--bg-primary)' }}
+            data-testid="app-root"
+        >
             <SolarSystem
                 darkMode={darkMode}
-                transferProgress={transferProgress.totalChunks > 0 ? transferProgress.sentChunks / transferProgress.totalChunks : 0}
-                isTransferring={view === 'transferring' && !transferProgress.complete}
+                transferProgress={
+                    transferProgress.totalChunks > 0
+                        ? transferProgress.sentChunks / transferProgress.totalChunks
+                        : 0
+                }
+                isTransferring={isTransferring && !isTransferComplete}
             />
             <Header darkMode={darkMode} onToggleDark={() => setDarkMode((d) => !d)} />
 
@@ -337,12 +335,46 @@ export default function App() {
                     <ErrorNotification
                         error={error}
                         onDismiss={() => setError(null)}
+                        data-testid="error-notification"
                     />
                 )}
 
+                {/* ── SAS verification overlay (MITM defence) ───────── */}
+                {sasCode && (
+                    <SasVerification
+                        code={sasCode}
+                        onConfirm={confirmSas}
+                        onReject={handleSasReject}
+                    />
+                )}
+
+                {/* ── Receive confirmation overlay (Feature 4) ──────── */}
+                {receiveRequest && !sasCode && (
+                    <ReceiveConfirmation
+                        request={receiveRequest}
+                        onAccept={handleAcceptReceive}
+                        onReject={handleDeclineReceive}
+                    />
+                )}
+
+                {/* ── Transfer history panel (Feature 6) ────────────── */}
+                {showHistory && (
+                    <HistoryView history={history} onClose={() => setShowHistory(false)} />
+                )}
+
+                {/* ── Saved devices / contacts panel (Feature 11) ───── */}
+                {showContacts && (
+                    <ContactsView remembered={remembered} onClose={() => setShowContacts(false)} />
+                )}
+
+                {/* ── Group room (Phase 4: hybrid swarm, beta) ──────── */}
+                {showRoom && (
+                    <RoomView onClose={() => setShowRoom(false)} />
+                )}
+
+                {/* ── Home ──────────────────────────────────────────── */}
                 {view === 'home' && (
                     <div className="w-full max-w-2xl space-y-8 animate-fade-in">
-                        {/* Hero */}
                         <div className="text-center space-y-4">
                             <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight">
                                 <span className="gradient-text">LinkSpan</span>
@@ -350,18 +382,17 @@ export default function App() {
                             <p className="text-lg md:text-xl" style={{ color: 'var(--text-secondary)' }}>
                                 Free, encrypted, peer-to-peer file transfer.
                                 <br />
-                                No signup. No cloud. No limits.
+                                No signup. No cloud storage on the default path.
                             </p>
                         </div>
 
-                        {/* Action Cards — 3D tilt + glow border + glare */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 stagger-children">
-                            {/* Send Card */}
                             <InteractiveCard
                                 id="send-card"
                                 onClick={() => setView('send')}
                                 className="p-8 text-left animate-fade-in"
                                 tiltOpts={{ maxTilt: 8, scale: 1.12 }}
+                                data-testid="send-tab"
                             >
                                 <GlowIcon>
                                     <svg className="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -374,12 +405,12 @@ export default function App() {
                                 </p>
                             </InteractiveCard>
 
-                            {/* Receive Card */}
                             <InteractiveCard
                                 id="receive-card"
                                 onClick={() => setView('receive')}
                                 className="p-8 text-left animate-fade-in"
                                 tiltOpts={{ maxTilt: 8, scale: 1.12 }}
+                                data-testid="receive-tab"
                             >
                                 <GlowIcon color="#40c057">
                                     <svg className="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -393,7 +424,6 @@ export default function App() {
                             </InteractiveCard>
                         </div>
 
-                        {/* Features — dock-style magnification */}
                         <div className="dock-container pt-4">
                             {[
                                 { icon: '🔒', label: 'E2E Encrypted' },
@@ -407,36 +437,178 @@ export default function App() {
                                 </div>
                             ))}
                         </div>
+
+                        <div className="text-center flex items-center justify-center gap-6">
+                            <button
+                                type="button"
+                                onClick={() => setShowHistory(true)}
+                                data-testid="open-history"
+                                className="text-sm font-medium underline hover:no-underline"
+                                style={{ color: 'var(--text-muted)' }}
+                            >
+                                📜 Transfer history
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowContacts(true)}
+                                data-testid="open-contacts"
+                                className="text-sm font-medium underline hover:no-underline"
+                                style={{ color: 'var(--text-muted)' }}
+                            >
+                                💻 Saved devices
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowRoom(true)}
+                                data-testid="open-room"
+                                className="text-sm font-medium underline hover:no-underline"
+                                style={{ color: 'var(--text-muted)' }}
+                            >
+                                👥 Group room
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setView('sharelink-create')}
+                                data-testid="open-sharelink"
+                                className="text-sm font-medium underline hover:no-underline"
+                                style={{ color: 'var(--text-muted)' }}
+                            >
+                                🔗 Share link
+                            </button>
+                        </div>
                     </div>
                 )}
 
+                {/* ── Share link: create (async upload, no live peer) ─ */}
+                {view === 'sharelink-create' && (
+                    <div className="w-full max-w-2xl animate-fade-in" data-testid="sharelink-create-view">
+                        <ShareLinkView mode="create" onClose={() => setView('home')} />
+                    </div>
+                )}
+
+                {/* ── Share link: receive (opened from ?s=<id>#k=<key>) ─ */}
+                {view === 'sharelink-receive' && shareRef && (
+                    <div className="w-full max-w-2xl animate-fade-in" data-testid="sharelink-receive-view">
+                        <ShareLinkView
+                            mode="receive"
+                            shareRef={shareRef}
+                            onClose={() => { setShareRef(null); setView('home'); }}
+                        />
+                    </div>
+                )}
+
+                {/* ── Send ──────────────────────────────────────────── */}
                 {view === 'send' && (
-                    <SendView
-                        pairingCode={pairingCode}
-                        connectionState={connectionState}
-                        onFileSelect={handleSendFile}
-                        onBack={() => { cleanup(); setView('home'); }}
-                    />
+                    <div data-testid="send-view">
+                        {/* data-testid on pairing code is rendered inside SendView */}
+                        <SendView
+                            pairingCode={pairingCode}
+                            connectionState={transferState}
+                            onFileSelect={handleSendFile}
+                            onBack={handleBack}
+                            peerConnected={isPeerConnected}
+                        />
+                    </div>
                 )}
 
+                {/* ── Receive ───────────────────────────────────────── */}
                 {view === 'receive' && (
-                    <ReceiveView
-                        connectionState={connectionState}
-                        onSubmitCode={handleReceive}
-                        onBack={() => { cleanup(); setView('home'); }}
-                    />
+                    <div data-testid="receive-view">
+                        <ReceiveView
+                            connectionState={transferState}
+                            onSubmitCode={handleReceive}
+                            onBack={handleBack}
+                            destinationSupported={destinationSupported}
+                            onChooseDestination={chooseDestination}
+                            onClearDestination={clearDestination}
+                        />
+                    </div>
                 )}
 
+                {/* ── Transferring ───────────────────────────────────── */}
                 {view === 'transferring' && (
-                    <div className="w-full max-w-2xl space-y-6 animate-fade-in">
-                        <TransferProgress {...transferProgress} />
+                    <div
+                        className="w-full max-w-2xl space-y-6 animate-fade-in"
+                        data-testid="transfer-view"
+                    >
+                        {/* Connection mode — explicit, honest routing + encryption status */}
+                        {isPeerConnected && (
+                            <div data-testid="peer-connected">
+                                <ConnectionMode
+                                    relayMode={diagnostics.relayMode}
+                                    transport={diagnostics.transport}
+                                    encrypted={diagnostics.encrypted}
+                                />
+                            </div>
+                        )}
+
+                        {/* Multi-file / folder batch indicator + overall progress */}
+                        {transferProgress.totalFiles > 1 && (
+                            <div
+                                className="space-y-2 py-3 px-4 rounded-2xl"
+                                style={{ background: 'var(--bg-secondary)' }}
+                                data-testid="file-queue-indicator"
+                            >
+                                <div className="flex items-center justify-between text-sm" style={{ color: 'var(--text-muted)' }}>
+                                    <span>File {Math.min(currentFileIndex + 1, transferProgress.totalFiles)} of {transferProgress.totalFiles}</span>
+                                    <span>{formatBytes(batchBytesDone)} / {formatBytes(transferProgress.batchTotalBytes)}</span>
+                                </div>
+                                <div className="h-2 rounded-full overflow-hidden" style={{ background: 'var(--border-color)' }}>
+                                    <div
+                                        className="h-full gradient-bg transition-all duration-300"
+                                        style={{ width: `${batchPercent}%` }}
+                                        data-testid="batch-progress-bar"
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        <TransferProgress
+                            {...transferProgress}
+                            transferState={transferState}
+                            onPause={handlePause}
+                            onResume={handleResume}
+                            onCancel={handleCancel}
+                            data-testid="transfer-progress"
+                        />
+
+                        {/* Received text preview (Feature 7) */}
+                        {textPreview && (
+                            <TextPreview
+                                text={textPreview.text}
+                                format={textPreview.format}
+                                fileName={textPreview.fileName}
+                                onDone={handleTextDone}
+                            />
+                        )}
+
+                        {/* Received link preview (Feature 9) */}
+                        {linkPreview && (
+                            <LinkPreview link={linkPreview} onDone={handleLinkDone} />
+                        )}
+
+                        {/* Transfer complete indicator for E2E tests */}
+                        {isTransferComplete && !textPreview && !linkPreview && (
+                            <div
+                                className="text-center py-4 rounded-xl"
+                                style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+                                data-testid="transfer-complete"
+                            >
+                                {transferProgress.savedToDisk
+                                    ? `✅ Transfer complete — saved to ${transferProgress.savedLocation || 'your folder'}`
+                                    : '✅ Transfer complete — file downloaded'}
+                            </div>
+                        )}
+
                         <DiagnosticsPanel {...diagnostics} />
                     </div>
                 )}
             </main>
 
-            {/* Footer */}
-            <footer className="text-center py-4 text-xs relative z-10" style={{ color: 'var(--text-muted)' }}>
+            <footer
+                className="text-center py-4 text-xs relative z-10"
+                style={{ color: 'var(--text-muted)' }}
+            >
                 LinkSpan — Open source, zero cost, peer-to-peer.{' '}
                 <a
                     href="https://github.com/linkspan"

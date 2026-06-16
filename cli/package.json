@@ -1,0 +1,46 @@
+{
+  "name": "@linkspan/cli",
+  "version": "0.1.0",
+  "description": "Command-line client for LinkSpan — share files, folders, and text from your terminal",
+  "type": "module",
+  "bin": {
+    "linkspan": "bin/linkspan.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/",
+    "lint": "eslint bin/ src/ test/",
+    "start": "node bin/linkspan.js"
+  },
+  "dependencies": {
+    "@linkspan/sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  },
+  "keywords": [
+    "linkspan",
+    "cli",
+    "file-transfer",
+    "share"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

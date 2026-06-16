@@ -1,0 +1,122 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Models ────────────────────────────────────────────────────────────────────
+//
+// NOTE: per-transfer analytics are intentionally NOT persisted server-side. Transfers
+// are end-to-end between peers; the client's IndexedDB HistoryManager is the source of
+// truth for a user's own transfer history. (The former orphaned `Transfer` model and
+// `TransferStatus` enum were removed — they were never wired to any code path.)
+
+model AuditLog {
+  id         String       @id @default(cuid())
+  timestamp  DateTime     @default(now())
+  eventType  AuditEvent   @map("event_type")
+  ip         String?
+  sessionId  String?      @map("session_id")
+  peerId     String?      @map("peer_id")
+  detail     Json?        // arbitrary event metadata
+  severity   LogSeverity  @default(INFO)
+
+  @@index([timestamp])
+  @@index([eventType])
+  @@index([ip])
+  @@map("audit_logs")
+}
+
+model Device {
+  id          String   @id @default(cuid())
+  fingerprint String   @unique  // browser fingerprint hash
+  firstSeen   DateTime @default(now()) @map("first_seen")
+  lastSeen    DateTime @updatedAt @map("last_seen")
+  transferCount Int    @default(0) @map("transfer_count")
+  totalBytes  BigInt   @default(0) @map("total_bytes")
+  accountId   String?  @map("account_id")
+  account     Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([fingerprint])
+  @@index([accountId])
+  @@map("devices")
+}
+
+model Account {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?  @map("password_hash")  // null for OAuth-only accounts
+  passwordSalt String?  @map("password_salt")
+  provider     String?                          // 'google' | 'github' | null (local)
+  providerId   String?  @map("provider_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  isActive     Boolean  @default(true) @map("is_active")
+  devices      Device[]
+  refreshTokens RefreshToken[]
+  apiKeys      ApiKeyRecord[]
+
+  @@unique([provider, providerId])
+  @@index([email])
+  @@map("accounts")
+}
+
+// A refresh token is stored only as its SHA-256 hash. Rotated on every use.
+model RefreshToken {
+  tokenHash String   @id @map("token_hash")
+  accountId String   @map("account_id")
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([accountId])
+  @@map("refresh_tokens")
+}
+
+// Metadata for an account-issued API key (the secret itself is a stateless signed token;
+// only its jti is tracked here so an individual key can be listed and revoked).
+model ApiKeyRecord {
+  id        String    @id                       // jti embedded in the signed key
+  accountId String    @map("account_id")
+  account   Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  label     String?
+  scopes    String[]
+  revoked   Boolean   @default(false)
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime? @map("expires_at")
+
+  @@index([accountId])
+  @@map("api_key_records")
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
+enum AuditEvent {
+  SESSION_CREATED
+  SESSION_JOINED
+  SESSION_JOIN_FAILED
+  SESSION_CLOSED
+  TRANSFER_STARTED
+  TRANSFER_COMPLETED
+  TRANSFER_FAILED
+  TRANSFER_CANCELLED
+  RATE_LIMIT_HIT
+  BRUTE_FORCE_LOCKOUT
+  TOKEN_VALIDATION_FAILED
+  RELAY_ACTIVATED
+  ICE_RESTART
+  INVALID_MESSAGE
+}
+
+enum LogSeverity {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}

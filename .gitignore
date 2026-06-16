@@ -34,6 +34,13 @@ Thumbs.db
 # Coverage
 coverage/
 
+# Test artifacts
+test-results/
+playwright-report/
+
+# Runtime data
+.linkspan-blobs/
+
 # Cache
 .cache/
 .eslintcache

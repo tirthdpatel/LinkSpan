@@ -1,0 +1,58 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: linkspan-signaling-hpa
+  namespace: linkspan
+  labels:
+    app.kubernetes.io/name: linkspan
+    app.kubernetes.io/component: signaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: linkspan-signaling
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    # Scale on CPU utilization
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    # Scale on memory utilization
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+    # Scale on active sessions (custom metric from Prometheus adapter)
+    # Requires: https://github.com/kubernetes-sigs/prometheus-adapter
+    - type: External
+      external:
+        metric:
+          name: linkspan_active_sessions
+          selector:
+            matchLabels:
+              namespace: linkspan
+        target:
+          type: AverageValue
+          averageValue: "100"   # scale up when avg sessions per pod > 100
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # 5 min cooldown before scale-down
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

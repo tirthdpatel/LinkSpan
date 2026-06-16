@@ -57,7 +57,14 @@ export function TransferProgress({ sentChunks, totalChunks, speed, role, fileNam
 
             {/* Progress Bar */}
             <div className="space-y-2">
-                <div className="progress-bar-track">
+                <div
+                    className="progress-bar-track"
+                    role="progressbar"
+                    aria-valuenow={Math.round(Math.min(progress, 100))}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label="Transfer progress"
+                >
                     <div
                         className="progress-bar-fill"
                         style={{ width: `${Math.min(progress, 100)}%` }}

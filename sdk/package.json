@@ -1,0 +1,49 @@
+{
+  "name": "@linkspan/sdk",
+  "version": "0.1.0",
+  "description": "Official JavaScript/TypeScript/Node SDK for the LinkSpan share-link REST API",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src/",
+    "index.d.ts",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/",
+    "lint": "eslint src/ test/"
+  },
+  "keywords": [
+    "linkspan",
+    "file-transfer",
+    "share-link",
+    "p2p",
+    "sdk"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/linkspan/linkspan"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

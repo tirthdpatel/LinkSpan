@@ -523,3 +523,39 @@
 .dock-container .dock-item:has(+ .dock-item + .dock-item:hover) {
   transform: scale(1.04) translateY(-1px);
 }
+/* ── Received-text preview (Feature 7) ───────────────────────────── */
+.ls-text-content .ls-text-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  margin: 0;
+}
+.ls-text-content h1,
+.ls-text-content h2,
+.ls-text-content h3 { font-weight: 700; margin: 0.6em 0 0.3em; }
+.ls-text-content h1 { font-size: 1.4rem; }
+.ls-text-content h2 { font-size: 1.2rem; }
+.ls-text-content h3 { font-size: 1.05rem; }
+.ls-text-content p { margin: 0.4em 0; line-height: 1.6; }
+.ls-text-content ul { margin: 0.4em 0; padding-left: 1.4em; list-style: disc; }
+.ls-text-content li { margin: 0.15em 0; }
+.ls-text-content code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--bg-secondary);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.ls-text-content pre {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.85rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ls-text-content pre code { background: none; padding: 0; }
+.ls-text-content a { color: var(--gradient-start, #4c6ef5); text-decoration: underline; }
