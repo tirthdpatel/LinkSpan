@@ -9,7 +9,7 @@ A complete, ₹0 / no-credit-card deployment for a portfolio or college project.
 | Blob storage for share links | **Supabase Storage** (S3-compatible) | Yes (1 GB) | No |
 | Redis (rate-limit / sessions) | **Upstash** | Yes | No |
 | Postgres (optional accounts) | **Supabase Postgres** | Yes | No |
-| TURN relay (NAT traversal) | **Metered** Open Relay | Yes (50 GB/mo) | No |
+| TURN relay (NAT traversal) | **Metered Open Relay Project** (public free TURN) | Yes (best-effort, no quota signup) | No |
 | STUN | Google public STUN | Yes | No |
 
 **Architecture is WebRTC-first:** actual file bytes move **peer-to-peer between
@@ -46,6 +46,13 @@ Create a free project at <https://supabase.com> (sign in with GitHub, no card).
 3. You'll paste these into Render as `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
    `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 
+> ⚠️ **Region must match.** Supabase signs S3 requests with SigV4, which embeds
+> the region in the credential scope — a mismatch returns **403 on every storage
+> call**. `render.yaml` ships a default `S3_REGION` value, but Supabase assigns
+> *your* project's region (e.g. `ap-northeast-2`). Use whatever the S3 Connection
+> panel shows; override `S3_REGION` in `render.yaml` (or the Render dashboard) to
+> match before deploying.
+
 ### 1b. Postgres (optional — only for persistent user accounts)
 
 The app runs fully **without** Postgres (anonymous use works; accounts just live
@@ -69,18 +76,35 @@ metadata survive restarts.
 
 ---
 
-## 3. Metered — TURN relay (recommended)
+## 3. TURN relay — Metered Open Relay Project (recommended, free)
 
-1. Sign up at <https://www.metered.ca> (no card). Dashboard → **TURN Server**.
-2. Copy the **static credentials**: a username and a password (credential).
-   The default relay domain `global.relay.metered.ca` is already the client's
-   default.
-3. These become `VITE_TURN_USERNAME` and `VITE_TURN_CREDENTIAL` on Vercel.
+> Note: Metered's **dashboard/account** TURN is now only a **500 MB free trial**,
+> not the 50 GB it once offered. Use Metered's separate **Open Relay Project**
+> instead — a public, always-free TURN with shared static credentials, no signup,
+> no card, no quota gate. The client builds `turn:<domain>:80/443` + `turns:443`
+> with static creds (`src/core/PeerConnection.js`), which is exactly what Open
+> Relay expects, so it's a zero-code-change drop-in.
+
+Set these on Vercel (no account needed — the credentials are public):
+
+- `VITE_TURN_DOMAIN` = `openrelay.metered.ca`
+- `VITE_TURN_USERNAME` = `openrelayproject`
+- `VITE_TURN_CREDENTIAL` = `openrelayproject`
 
 Why TURN: STUN (free, Google) handles most NATs, but when both peers are behind
 strict/symmetric NAT, direct P2P fails and the connection needs a TURN relay.
 Without TURN those specific transfers fall back to the server relay (capped at
 100 MB — see §6).
+
+Security note: Open Relay is a blind packet relay below the encryption layers.
+Files are encrypted twice — app-layer AES-256-GCM (key derived via ECDH between
+the two browsers, never transmitted) and then WebRTC DTLS. The TURN operator
+holds neither key and only ever sees doubly-encrypted ciphertext.
+
+Tradeoff: Open Relay is community/best-effort (no SLA). Fine for a portfolio/
+demo. If you outgrow it, Cloudflare Realtime TURN has a larger free tier but
+issues **short-lived dynamic** credentials via API — the client currently only
+supports static creds baked at build time, so that path needs a code change.
 
 ---
 
@@ -124,9 +148,9 @@ security headers, CSP that already allows `wss:`).
 2. Set **Root Directory** to `client`. Vercel auto-detects Vite.
 3. Add **Environment Variables** (Production):
    - `VITE_SIGNALING_URL` = `wss://<your-render-host>.onrender.com`  ← must be `wss://`
-   - `VITE_TURN_USERNAME` = your Metered username
-   - `VITE_TURN_CREDENTIAL` = your Metered credential
-   - `VITE_TURN_DOMAIN` = `global.relay.metered.ca` (optional; this is the default)
+   - `VITE_TURN_DOMAIN` = `openrelay.metered.ca`  (Open Relay Project — see §3)
+   - `VITE_TURN_USERNAME` = `openrelayproject`
+   - `VITE_TURN_CREDENTIAL` = `openrelayproject`
 4. **Deploy.** Copy the resulting URL (e.g. `https://linkspan.vercel.app`).
 5. Go back to Render → set `CORS_ORIGIN` and `SHARE_VIEW_URL` to that exact URL
    (no trailing slash) → **Manual Deploy / Save**. The client and server now
@@ -206,8 +230,10 @@ Other limitations to be aware of:
   within it.
 - **Supabase free storage = 1 GB**; projects pause after ~1 week of total
   inactivity (just reopen the dashboard to resume).
-- **Metered free TURN = 50 GB/month** of relayed traffic. Only relayed
-  connections count; direct P2P transfers don't.
+- **Open Relay Project TURN** is public/best-effort with no signup quota, but no
+  SLA — it can be slow or briefly unavailable. Only relayed connections use it;
+  direct P2P transfers don't touch it. (Metered's *account* TURN is now just a
+  500 MB trial — see §3 for why Open Relay is used instead.)
 - **No custom domain TLS work needed** — Vercel and Render both give HTTPS/WSS
   on their default domains automatically.
 
