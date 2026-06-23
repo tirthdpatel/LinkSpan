@@ -18,38 +18,78 @@ import { RoomConnection } from '../core/RoomConnection.js';
 
 const SIGNALING_URL = import.meta.env?.VITE_SIGNALING_URL || 'ws://localhost:10000';
 
+// Data-channel id reserved for room control traffic (chat). Channels are negotiated
+// with fixed ids on both sides, so id 0 refers to the same channel on every peer.
+const CHAT_CHANNEL_ID = 0;
+
 export function useRoom() {
     const [status, setStatus] = useState('idle'); // idle | connecting | in-room | error
     const [joinCode, setJoinCode] = useState(null);
     const [roster, setRoster] = useState([]);
     const [topology, setTopology] = useState('direct');
     const [error, setError] = useState(null);
+    const [messages, setMessages] = useState([]); // { id, from, name, text, ts, self }
 
     const signalingRef = useRef(null);
     const roomRef = useRef(null);
-    const channelsRef = useRef(new Map()); // remoteId → RTCDataChannel
+    const chatChannelsRef = useRef(new Map()); // remoteId → RTCDataChannel (chat/control)
+    const selfIdRef = useRef(null);
+    const selfNameRef = useRef('');
+    const seenMsgRef = useRef(new Set()); // dedupe by message id (mesh broadcast)
 
     const _teardown = useCallback(() => {
         try { roomRef.current?.close(); } catch { /* ignore */ }
         try { signalingRef.current?.disconnect(); } catch { /* ignore */ }
         roomRef.current = null;
         signalingRef.current = null;
-        channelsRef.current = new Map();
+        chatChannelsRef.current = new Map();
+        seenMsgRef.current = new Set();
+        selfIdRef.current = null;
     }, []);
 
     useEffect(() => () => _teardown(), [_teardown]);
 
+    // Append an incoming/own chat message, de-duplicated by id (a mesh delivers the
+    // same broadcast from multiple peers; we keep the first and drop repeats).
+    const _ingestChat = useCallback((msg, self) => {
+        if (!msg || msg.kind !== 'chat' || !msg.id) return;
+        if (seenMsgRef.current.has(msg.id)) return;
+        seenMsgRef.current.add(msg.id);
+        setMessages((prev) => [...prev, {
+            id: msg.id,
+            from: msg.from,
+            name: msg.name || (msg.from ? msg.from.slice(0, 8) : 'peer'),
+            text: String(msg.text ?? ''),
+            ts: msg.ts || Date.now(),
+            self: Boolean(self),
+        }]);
+    }, []);
+
     const _buildRoom = useCallback((selfId, token, signaling) => {
+        selfIdRef.current = selfId;
+
+        // Wire the chat/control channel for a peer: store it and parse inbound chat.
+        const wireChatChannel = (remoteId, channel) => {
+            if (channel.id !== CHAT_CHANNEL_ID) return; // only the control channel
+            chatChannelsRef.current.set(remoteId, channel);
+            channel.onmessage = (event) => {
+                if (typeof event.data !== 'string') return; // ignore binary (file) frames
+                let msg;
+                try { msg = JSON.parse(event.data); } catch { return; }
+                _ingestChat(msg, false);
+            };
+        };
+
         const createPeer = (remoteId) => {
             const peer = new PeerConnection({
                 onIceCandidate: (candidate) =>
                     signaling.sendRoom({ type: 'ice-candidate', to: remoteId, token, payload: candidate }),
-                onChannel: (channel) => { channelsRef.current.set(remoteId, channel); },
+                onChannel: (channel) => { wireChatChannel(remoteId, channel); },
                 onConnectionStateChange: () => {},
             });
             peer.init();
             // Negotiated channels are created on both sides (matches the 1:1 path).
-            peer.createChannels((channel) => { channelsRef.current.set(remoteId, channel); });
+            peer.createChannels((channel) => { wireChatChannel(remoteId, channel); });
             return peer;
         };
 
@@ -67,7 +107,7 @@ export function useRoom() {
         signaling.on('room-peer-left', (data) => room.handlePeerLeft(data));
         signaling.on('room-peer-joined', () => {});
         return room;
-    }, []);
+    }, [_ingestChat]);
 
     const _connect = useCallback(async () => {
         const signaling = new SignalingClient(SIGNALING_URL);
@@ -78,7 +118,8 @@ export function useRoom() {
     }, []);
 
     const createRoom = useCallback(async (name) => {
-        setStatus('connecting'); setError(null);
+        setStatus('connecting'); setError(null); setMessages([]);
+        selfNameRef.current = name || '';
         try {
             const signaling = await _connect();
             signaling.on('room-created', (data) => {
@@ -92,7 +133,8 @@ export function useRoom() {
     }, [_connect, _buildRoom]);
 
     const joinRoom = useCallback(async (code, name) => {
-        setStatus('connecting'); setError(null);
+        setStatus('connecting'); setError(null); setMessages([]);
+        selfNameRef.current = name || '';
         try {
             const signaling = await _connect();
             signaling.on('room-created', (data) => {
@@ -104,11 +146,36 @@ export function useRoom() {
         } catch (e) { setError(e.message); setStatus('error'); }
     }, [_connect, _buildRoom]);
 
+    // Broadcast a chat message to every connected room peer over the control channel.
+    // Returns false if no peer channel is open yet (nothing was sent).
+    const sendMessage = useCallback((text) => {
+        const body = String(text ?? '').trim();
+        if (!body || !selfIdRef.current) return false;
+        const msg = {
+            kind: 'chat',
+            id: `${selfIdRef.current}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+            from: selfIdRef.current,
+            name: selfNameRef.current || selfIdRef.current.slice(0, 8),
+            text: body,
+            ts: Date.now(),
+        };
+        const frame = JSON.stringify(msg);
+        let delivered = 0;
+        for (const channel of chatChannelsRef.current.values()) {
+            if (channel.readyState === 'open') {
+                try { channel.send(frame); delivered++; } catch { /* peer dropped */ }
+            }
+        }
+        // Echo locally regardless so the sender sees their own message immediately.
+        _ingestChat(msg, true);
+        return delivered > 0;
+    }, [_ingestChat]);
+
     const leaveRoom = useCallback(() => {
         try { signalingRef.current?.leaveRoom(); } catch { /* ignore */ }
         _teardown();
-        setStatus('idle'); setJoinCode(null); setRoster([]); setTopology('direct');
+        setStatus('idle'); setJoinCode(null); setRoster([]); setTopology('direct'); setMessages([]);
     }, [_teardown]);
 
-    return { status, joinCode, roster, topology, error, createRoom, joinRoom, leaveRoom };
+    return { status, joinCode, roster, topology, error, messages, createRoom, joinRoom, leaveRoom, sendMessage };
 }

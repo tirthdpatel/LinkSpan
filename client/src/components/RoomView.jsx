@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRoom } from '../hooks/useRoom.js';
 
 const TOPOLOGY_LABEL = {
@@ -15,11 +15,25 @@ const TOPOLOGY_LABEL = {
  * @param {{ onClose: () => void }} props
  */
 export function RoomView({ onClose }) {
-    const { status, joinCode, roster, topology, error, createRoom, joinRoom, leaveRoom } = useRoom();
+    const { status, joinCode, roster, topology, error, messages, createRoom, joinRoom, leaveRoom, sendMessage } = useRoom();
     const [code, setCode] = useState('');
     const [name, setName] = useState('');
+    const [draft, setDraft] = useState('');
 
     const inRoom = status === 'in-room';
+
+    // Auto-scroll the chat log to the newest message.
+    const logRef = useRef(null);
+    useEffect(() => {
+        if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    }, [messages]);
+
+    const submitChat = (e) => {
+        e.preventDefault();
+        if (!draft.trim()) return;
+        sendMessage(draft);
+        setDraft('');
+    };
 
     return (
         <div
@@ -98,6 +112,52 @@ export function RoomView({ onClose }) {
                                 ))}
                             </ul>
                         </div>
+
+                        {/* Group chat — messages travel peer-to-peer over the room mesh
+                            (DTLS-encrypted; the server never sees them). */}
+                        <div className="flex flex-col" style={{ minHeight: 0 }}>
+                            <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-primary)' }}>Chat</p>
+                            <div
+                                ref={logRef}
+                                data-testid="room-chat-log"
+                                className="rounded-lg p-3 space-y-2 overflow-y-auto text-sm"
+                                style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)', height: '180px' }}
+                            >
+                                {messages.length === 0 && (
+                                    <p style={{ color: 'var(--text-muted)' }}>No messages yet. Say hello 👋</p>
+                                )}
+                                {messages.map((m) => (
+                                    <div key={m.id} className={m.self ? 'text-right' : 'text-left'}>
+                                        {!m.self && (
+                                            <span className="block text-xs font-medium" style={{ color: 'var(--text-muted)' }}>{m.name}</span>
+                                        )}
+                                        <span
+                                            className="inline-block rounded-lg px-3 py-1.5 break-words"
+                                            style={{
+                                                background: m.self ? 'var(--accent, #4f8cff)' : 'var(--bg-secondary)',
+                                                color: m.self ? '#fff' : 'var(--text-primary)',
+                                                border: m.self ? 'none' : '1px solid var(--border-color)',
+                                                maxWidth: '85%',
+                                            }}
+                                        >{m.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <form onSubmit={submitChat} className="flex gap-2 mt-2">
+                                <input
+                                    type="text" value={draft} onChange={(e) => setDraft(e.target.value)}
+                                    placeholder="Type a message" data-testid="room-chat-input" maxLength={2000}
+                                    className="flex-1 rounded-lg px-3 py-2 text-sm outline-none"
+                                    style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
+                                />
+                                <button
+                                    type="submit" data-testid="room-chat-send" disabled={!draft.trim()}
+                                    className="rounded-lg px-4 py-2 font-medium"
+                                    style={{ background: 'var(--accent, #4f8cff)', color: '#fff' }}
+                                >Send</button>
+                            </form>
+                        </div>
+
                         <button
                             type="button" data-testid="room-leave" onClick={() => { leaveRoom(); onClose(); }}
                             className="w-full rounded-lg px-4 py-2 font-medium"
