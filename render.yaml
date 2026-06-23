@@ -1,0 +1,72 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Render Blueprint — LinkSpan signaling server (Free tier, native Node)
+#
+# Deploy: push this file to your repo, then in the Render dashboard choose
+# "New +" → "Blueprint" and point it at the repo. Render reads this file and
+# provisions the service. Native Node is used (no Docker build minutes); the
+# server has no build step, so we just install deps and run it.
+#
+# IMPORTANT free-tier notes:
+#  • Free web services SLEEP after ~15 min idle and cold-start (~50s) on the
+#    next request. The client auto-reconnects, but the first connection after
+#    sleep is slow. (Acceptable for a portfolio/college demo.)
+#  • Free services have no persistent disk — which is fine here because blob
+#    storage lives on Supabase S3, not local disk.
+#  • WebSockets are supported on Render free.
+# ──────────────────────────────────────────────────────────────────────────
+services:
+  - type: web
+    name: linkspan-signaling
+    runtime: node
+    plan: free
+    region: oregon
+    # Build from repo root so the `../../shared` import resolves.
+    buildCommand: npm --prefix server ci --omit=dev
+    startCommand: node server/src/server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUSTED_PROXY_COUNT
+        value: "1"
+
+      # Secrets — auto-generated, stable across restarts.
+      - key: TOKEN_SECRET
+        generateValue: true
+      - key: AUTH_JWT_SECRET
+        generateValue: true
+      - key: METRICS_TOKEN
+        generateValue: true
+
+      # Fill these in the Render dashboard (sync:false = prompt, never committed).
+      - key: CORS_ORIGIN          # https://your-app.vercel.app
+        sync: false
+      - key: PUBLIC_BASE_URL      # https://linkspan-signaling.onrender.com
+        sync: false
+      - key: SHARE_VIEW_URL       # https://your-app.vercel.app
+        sync: false
+
+      # Redis — Upstash Free (rediss:// TLS URL)
+      - key: REDIS_URL
+        sync: false
+
+      # Share-link blob storage — Supabase Storage (S3-compatible)
+      - key: SHARE_STORAGE
+        value: s3
+      - key: S3_REGION
+        value: us-east-1
+      - key: S3_PREFIX
+        value: blobs/
+      - key: S3_BUCKET
+        sync: false             # e.g. linkspan-blobs
+      - key: S3_ENDPOINT
+        sync: false             # https://PROJECT_REF.supabase.co/storage/v1/s3
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+
+      # Optional: persistent accounts via Supabase Postgres (see DEPLOYMENT.md).
+      # - key: DATABASE_URL
+      #   sync: false
