@@ -42,6 +42,13 @@ services:
       - key: RL_MAX_JOIN_ATTEMPTS_PER_MIN
         value: "60"
 
+      # Allow anonymous share-link creation (no API key). In production the
+      # default is false, which makes the "Create a share link" UI fail with
+      # "API key required". For a public portfolio demo we want anonymous use;
+      # uploads are still size-capped and bounded by the 1 GB Supabase free tier.
+      - key: API_ALLOW_ANONYMOUS
+        value: "true"
+
       # Secrets — auto-generated, stable across restarts.
       - key: TOKEN_SECRET
         generateValue: true
