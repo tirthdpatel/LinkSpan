@@ -31,6 +31,17 @@ services:
       - key: TRUSTED_PROXY_COUNT
         value: "1"
 
+      # Rate limits — the defaults (5 sessions/hr, 10 conns/min per IP) are too
+      # tight for an interactive demo where the sender creates a new session on
+      # each Send/reload. Raise them to demo-friendly values. Still per-IP, so
+      # this is not a DoS hole — just headroom for normal repeated use.
+      - key: RL_MAX_SESSIONS_PER_HOUR
+        value: "100"
+      - key: RL_MAX_CONNECTIONS_PER_MIN
+        value: "60"
+      - key: RL_MAX_JOIN_ATTEMPTS_PER_MIN
+        value: "60"
+
       # Secrets — auto-generated, stable across restarts.
       - key: TOKEN_SECRET
         generateValue: true
