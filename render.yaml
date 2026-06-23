@@ -55,7 +55,7 @@ services:
       - key: SHARE_STORAGE
         value: s3
       - key: S3_REGION
-        value: us-east-1
+        value: ap-northeast-2
       - key: S3_PREFIX
         value: blobs/
       - key: S3_BUCKET
