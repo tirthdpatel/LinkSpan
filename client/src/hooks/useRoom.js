@@ -18,9 +18,52 @@ import { RoomConnection } from '../core/RoomConnection.js';
 
 const SIGNALING_URL = import.meta.env?.VITE_SIGNALING_URL || 'ws://localhost:10000';
 
-// Data-channel id reserved for room control traffic (chat). Channels are negotiated
-// with fixed ids on both sides, so id 0 refers to the same channel on every peer.
+// Data-channel id reserved for room control traffic (chat + file frames). Channels are
+// negotiated with fixed ids on both sides, so id 0 refers to the same channel everywhere.
+// Chat/control travel as JSON strings; file chunks travel as binary ArrayBuffers, so the
+// two are told apart by `typeof event.data` in the receive handler.
 const CHAT_CHANNEL_ID = 0;
+
+// File broadcast: 64 KB chunks (safely under every browser's data-channel message cap)
+// and pause when a channel buffers more than this so we don't blow up memory.
+const ROOM_FILE_CHUNK = 64 * 1024;
+const ROOM_FILE_BUFFER_LIMIT = 1 * 1024 * 1024; // 1 MB
+
+// Binary chunk wire format: [u16 fileId-length][fileId utf8][u32 index][payload bytes].
+function frameFileChunk(fileId, index, payload) {
+    const idBytes = new TextEncoder().encode(fileId);
+    const out = new Uint8Array(2 + idBytes.length + 4 + payload.byteLength);
+    const dv = new DataView(out.buffer);
+    dv.setUint16(0, idBytes.length);
+    out.set(idBytes, 2);
+    dv.setUint32(2 + idBytes.length, index);
+    out.set(new Uint8Array(payload), 2 + idBytes.length + 4);
+    return out.buffer;
+}
+
+function parseFileChunk(buffer) {
+    const dv = new DataView(buffer);
+    const idLen = dv.getUint16(0);
+    const fileId = new TextDecoder().decode(new Uint8Array(buffer, 2, idLen));
+    const index = dv.getUint32(2 + idLen);
+    const payload = buffer.slice(2 + idLen + 4);
+    return { fileId, index, payload };
+}
+
+// Pause until a channel has drained below the buffer limit (backpressure).
+function waitForDrain(channel) {
+    if (channel.bufferedAmount <= ROOM_FILE_BUFFER_LIMIT) return Promise.resolve();
+    return new Promise((resolve) => {
+        const check = () => {
+            if (channel.readyState !== 'open' || channel.bufferedAmount <= ROOM_FILE_BUFFER_LIMIT) {
+                channel.removeEventListener('bufferedamountlow', check);
+                resolve();
+            }
+        };
+        channel.addEventListener('bufferedamountlow', check);
+        setTimeout(check, 100); // safety poll in case the event is missed
+    });
+}
 
 export function useRoom() {
     const [status, setStatus] = useState('idle'); // idle | connecting | in-room | error
@@ -37,6 +80,7 @@ export function useRoom() {
     const selfNameRef = useRef('');
     const seenMsgRef = useRef(new Set()); // dedupe by message id (mesh broadcast)
     const outboxRef = useRef([]); // own messages not yet delivered to any peer (offline queue)
+    const incomingFilesRef = useRef(new Map()); // fileId → { name, mime, size, chunks, parts[], received }
 
     const _teardown = useCallback(() => {
         try { roomRef.current?.close(); } catch { /* ignore */ }
@@ -46,6 +90,7 @@ export function useRoom() {
         chatChannelsRef.current = new Map();
         seenMsgRef.current = new Set();
         outboxRef.current = [];
+        incomingFilesRef.current = new Map();
         selfIdRef.current = null;
     }, []);
 
@@ -98,6 +143,51 @@ export function useRoom() {
         outboxRef.current = remaining;
     }, [_deliver, _markSent]);
 
+    // Insert/update a "file" entry in the chat log (shared by sender + receiver views).
+    const _upsertFileMessage = useCallback((fileId, patch, base) => {
+        setMessages((prev) => {
+            const i = prev.findIndex((m) => m.id === fileId);
+            if (i === -1) {
+                if (!base) return prev;
+                return [...prev, { id: fileId, ts: Date.now(), ...base, file: { ...base.file, ...patch } }];
+            }
+            const next = prev.slice();
+            next[i] = { ...next[i], file: { ...next[i].file, ...patch } };
+            return next;
+        });
+    }, []);
+
+    // Receiver: a peer announced a file. Allocate the reassembly buffer and a log entry.
+    const _handleFileMeta = useCallback((msg) => {
+        if (!msg.fileId || incomingFilesRef.current.has(msg.fileId)) return;
+        incomingFilesRef.current.set(msg.fileId, {
+            name: msg.name, mime: msg.mime || 'application/octet-stream',
+            size: msg.size || 0, chunks: msg.chunks || 0, parts: new Array(msg.chunks || 0), received: 0,
+        });
+        _upsertFileMessage(msg.fileId, {}, {
+            self: false, name: msg.senderName || (msg.from ? msg.from.slice(0, 8) : 'peer'),
+            file: { name: msg.name, size: msg.size || 0, progress: 0, status: 'receiving', direction: 'in' },
+        });
+    }, [_upsertFileMessage]);
+
+    // Receiver: a binary chunk arrived. Store it; assemble + expose a download when complete.
+    const _handleFileChunk = useCallback((buffer) => {
+        const { fileId, index, payload } = parseFileChunk(buffer);
+        const entry = incomingFilesRef.current.get(fileId);
+        if (!entry || entry.parts[index] !== undefined) return; // unknown or duplicate
+        entry.parts[index] = payload;
+        entry.received++;
+        const progress = entry.chunks ? Math.round((entry.received / entry.chunks) * 100) : 0;
+        if (entry.received >= entry.chunks) {
+            const blob = new Blob(entry.parts, { type: entry.mime });
+            const url = URL.createObjectURL(blob);
+            incomingFilesRef.current.delete(fileId);
+            _upsertFileMessage(fileId, { progress: 100, status: 'complete', url });
+        } else {
+            _upsertFileMessage(fileId, { progress });
+        }
+    }, [_upsertFileMessage]);
+
     const _buildRoom = useCallback((selfId, token, signaling) => {
         selfIdRef.current = selfId;
 
@@ -106,10 +196,11 @@ export function useRoom() {
             if (channel.id !== CHAT_CHANNEL_ID) return; // only the control channel
             chatChannelsRef.current.set(remoteId, channel);
             channel.onmessage = (event) => {
-                if (typeof event.data !== 'string') return; // ignore binary (file) frames
+                if (typeof event.data !== 'string') { _handleFileChunk(event.data); return; } // binary = file chunk
                 let msg;
                 try { msg = JSON.parse(event.data); } catch { return; }
-                _ingestChat(msg, false);
+                if (msg.kind === 'file-meta') _handleFileMeta(msg);
+                else _ingestChat(msg, false);
             };
             // This channel is wired at open time (negotiated channels call back on
             // open) — a peer just became reachable, so drain any queued messages.
@@ -143,7 +234,7 @@ export function useRoom() {
         signaling.on('room-peer-left', (data) => room.handlePeerLeft(data));
         signaling.on('room-peer-joined', () => {});
         return room;
-    }, [_ingestChat, _flushOutbox]);
+    }, [_ingestChat, _flushOutbox, _handleFileMeta, _handleFileChunk]);
 
     // Retry the offline queue: on a timer (covers ICE-restart reconnects where a
     // channel re-opens without a fresh callback) and when the OS reports it's online.
@@ -215,11 +306,53 @@ export function useRoom() {
         return delivered;
     }, [_ingestChat, _deliver]);
 
+    // Broadcast a file to every connected room peer over the mesh. Unlike chat, a file
+    // can't be meaningfully queued offline, so it requires at least one open peer channel.
+    // Chunks are streamed with backpressure; the data is DTLS-encrypted in transit.
+    const sendFile = useCallback(async (file) => {
+        if (!file || !selfIdRef.current) return false;
+        const openChannels = () => [...chatChannelsRef.current.values()].filter((c) => c.readyState === 'open');
+        if (openChannels().length === 0) {
+            setError('No connected peers yet — wait for someone to join before sending a file.');
+            return false;
+        }
+        setError(null);
+        const fileId = `f:${selfIdRef.current}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        const chunks = Math.max(1, Math.ceil(file.size / ROOM_FILE_CHUNK));
+        const senderName = selfNameRef.current || selfIdRef.current.slice(0, 8);
+
+        // Announce, then add a local outgoing entry to the chat log.
+        const meta = { kind: 'file-meta', fileId, from: selfIdRef.current, senderName, name: file.name, mime: file.type, size: file.size, chunks };
+        _deliver(meta);
+        _upsertFileMessage(fileId, {}, {
+            self: true, name: senderName,
+            file: { name: file.name, size: file.size, progress: 0, status: 'sending', direction: 'out' },
+        });
+
+        try {
+            for (let i = 0; i < chunks; i++) {
+                const slice = file.slice(i * ROOM_FILE_CHUNK, (i + 1) * ROOM_FILE_CHUNK);
+                const payload = await slice.arrayBuffer();
+                const frame = frameFileChunk(fileId, i, payload);
+                for (const channel of openChannels()) {
+                    try { channel.send(frame); await waitForDrain(channel); } catch { /* peer dropped mid-transfer */ }
+                }
+                _upsertFileMessage(fileId, { progress: Math.round(((i + 1) / chunks) * 100) });
+            }
+            _upsertFileMessage(fileId, { progress: 100, status: 'complete' });
+            return true;
+        } catch (e) {
+            _upsertFileMessage(fileId, { status: 'failed' });
+            setError(`File send failed: ${e.message}`);
+            return false;
+        }
+    }, [_deliver, _upsertFileMessage]);
+
     const leaveRoom = useCallback(() => {
         try { signalingRef.current?.leaveRoom(); } catch { /* ignore */ }
         _teardown();
         setStatus('idle'); setJoinCode(null); setRoster([]); setTopology('direct'); setMessages([]);
     }, [_teardown]);
 
-    return { status, joinCode, roster, topology, error, messages, createRoom, joinRoom, leaveRoom, sendMessage };
+    return { status, joinCode, roster, topology, error, messages, createRoom, joinRoom, leaveRoom, sendMessage, sendFile };
 }

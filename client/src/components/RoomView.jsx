@@ -14,8 +14,15 @@ const TOPOLOGY_LABEL = {
  *
  * @param {{ onClose: () => void }} props
  */
+const formatBytes = (n) => {
+    if (!n) return '0 B';
+    const u = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(n) / Math.log(1024));
+    return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+};
+
 export function RoomView({ onClose }) {
-    const { status, joinCode, roster, topology, error, messages, createRoom, joinRoom, leaveRoom, sendMessage } = useRoom();
+    const { status, joinCode, roster, topology, error, messages, createRoom, joinRoom, leaveRoom, sendMessage, sendFile } = useRoom();
     const [code, setCode] = useState('');
     const [name, setName] = useState('');
     const [draft, setDraft] = useState('');
@@ -24,6 +31,7 @@ export function RoomView({ onClose }) {
 
     // Auto-scroll the chat log to the newest message.
     const logRef = useRef(null);
+    const fileInputRef = useRef(null);
     useEffect(() => {
         if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
     }, [messages]);
@@ -33,6 +41,12 @@ export function RoomView({ onClose }) {
         if (!draft.trim()) return;
         sendMessage(draft);
         setDraft('');
+    };
+
+    const onPickFile = (e) => {
+        const file = e.target.files?.[0];
+        if (file) sendFile(file);
+        e.target.value = ''; // allow re-sending the same file
     };
 
     return (
@@ -131,27 +145,73 @@ export function RoomView({ onClose }) {
                                         {!m.self && (
                                             <span className="block text-xs font-medium" style={{ color: 'var(--text-muted)' }}>{m.name}</span>
                                         )}
-                                        <span
-                                            className="inline-block rounded-lg px-3 py-1.5 break-words"
-                                            style={{
-                                                background: m.self ? 'var(--accent, #4f8cff)' : 'var(--bg-secondary)',
-                                                color: m.self ? '#fff' : 'var(--text-primary)',
-                                                border: m.self ? 'none' : '1px solid var(--border-color)',
-                                                maxWidth: '85%',
-                                            }}
-                                        >{m.text}</span>
-                                        {m.self && (
+                                        {m.file ? (
                                             <span
-                                                className="block text-xs mt-0.5"
-                                                data-testid="room-chat-status"
-                                                title={m.status === 'sent' ? 'Sent' : 'Waiting to send — will deliver when reconnected'}
-                                                style={{ color: 'var(--text-muted)' }}
-                                            >{m.status === 'sent' ? '✓ Sent' : '🕓 Queued'}</span>
+                                                className="inline-block rounded-lg px-3 py-2 text-left"
+                                                data-testid="room-file-message"
+                                                style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', maxWidth: '85%', minWidth: '200px' }}
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <span aria-hidden>📎</span>
+                                                    <span className="font-medium break-all">{m.file.name}</span>
+                                                </span>
+                                                <span className="block text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>{formatBytes(m.file.size)}</span>
+                                                {m.file.status !== 'complete' && (
+                                                    <span className="block mt-1">
+                                                        <span className="block h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-color)' }}>
+                                                            <span className="block h-full gradient-bg" style={{ width: `${m.file.progress || 0}%` }} />
+                                                        </span>
+                                                        <span className="block text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                                                            {m.file.status === 'failed' ? 'Failed' : `${m.file.direction === 'out' ? 'Sending' : 'Receiving'}… ${m.file.progress || 0}%`}
+                                                        </span>
+                                                    </span>
+                                                )}
+                                                {m.file.status === 'complete' && m.file.direction === 'in' && m.file.url && (
+                                                    <a
+                                                        href={m.file.url} download={m.file.name} data-testid="room-file-download"
+                                                        className="inline-block mt-1 text-sm font-medium underline"
+                                                        style={{ color: 'var(--accent, #4f8cff)' }}
+                                                    >⬇ Download</a>
+                                                )}
+                                                {m.file.status === 'complete' && m.file.direction === 'out' && (
+                                                    <span className="block text-xs mt-1" style={{ color: 'var(--text-muted)' }}>✓ Sent</span>
+                                                )}
+                                            </span>
+                                        ) : (
+                                            <>
+                                                <span
+                                                    className="inline-block rounded-lg px-3 py-1.5 break-words"
+                                                    style={{
+                                                        background: m.self ? 'var(--accent, #4f8cff)' : 'var(--bg-secondary)',
+                                                        color: m.self ? '#fff' : 'var(--text-primary)',
+                                                        border: m.self ? 'none' : '1px solid var(--border-color)',
+                                                        maxWidth: '85%',
+                                                    }}
+                                                >{m.text}</span>
+                                                {m.self && (
+                                                    <span
+                                                        className="block text-xs mt-0.5"
+                                                        data-testid="room-chat-status"
+                                                        title={m.status === 'sent' ? 'Sent' : 'Waiting to send — will deliver when reconnected'}
+                                                        style={{ color: 'var(--text-muted)' }}
+                                                    >{m.status === 'sent' ? '✓ Sent' : '🕓 Queued'}</span>
+                                                )}
+                                            </>
                                         )}
                                     </div>
                                 ))}
                             </div>
                             <form onSubmit={submitChat} className="flex gap-2 mt-2">
+                                <input
+                                    ref={fileInputRef} type="file" className="hidden" data-testid="room-file-input"
+                                    onChange={onPickFile}
+                                />
+                                <button
+                                    type="button" data-testid="room-file-send" title="Send a file to the room"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="rounded-lg px-3 py-2 font-medium"
+                                    style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
+                                >📎</button>
                                 <input
                                     type="text" value={draft} onChange={(e) => setDraft(e.target.value)}
                                     placeholder="Type a message" data-testid="room-chat-input" maxLength={2000}
