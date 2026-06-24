@@ -590,13 +590,24 @@ export default function App() {
                         {/* Transfer complete indicator for E2E tests */}
                         {isTransferComplete && !textPreview && !linkPreview && (
                             <div
-                                className="text-center py-4 rounded-xl"
+                                className="text-center py-4 rounded-xl space-y-3"
                                 style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
                                 data-testid="transfer-complete"
                             >
-                                {transferProgress.savedToDisk
-                                    ? `✅ Transfer complete — saved to ${transferProgress.savedLocation || 'your folder'}`
-                                    : '✅ Transfer complete — file downloaded'}
+                                <div>
+                                    {transferProgress.savedToDisk
+                                        ? `✅ Transfer complete — saved to ${transferProgress.savedLocation || 'your folder'}`
+                                        : '✅ Transfer complete — file downloaded'}
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleBack}
+                                    data-testid="transfer-complete-home"
+                                    className="rounded-lg px-5 py-2 font-medium gradient-bg"
+                                    style={{ color: '#fff' }}
+                                >
+                                    Back to home
+                                </button>
                             </div>
                         )}
 

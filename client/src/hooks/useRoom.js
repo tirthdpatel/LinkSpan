@@ -36,6 +36,7 @@ export function useRoom() {
     const selfIdRef = useRef(null);
     const selfNameRef = useRef('');
     const seenMsgRef = useRef(new Set()); // dedupe by message id (mesh broadcast)
+    const outboxRef = useRef([]); // own messages not yet delivered to any peer (offline queue)
 
     const _teardown = useCallback(() => {
         try { roomRef.current?.close(); } catch { /* ignore */ }
@@ -44,6 +45,7 @@ export function useRoom() {
         signalingRef.current = null;
         chatChannelsRef.current = new Map();
         seenMsgRef.current = new Set();
+        outboxRef.current = [];
         selfIdRef.current = null;
     }, []);
 
@@ -51,7 +53,9 @@ export function useRoom() {
 
     // Append an incoming/own chat message, de-duplicated by id (a mesh delivers the
     // same broadcast from multiple peers; we keep the first and drop repeats).
-    const _ingestChat = useCallback((msg, self) => {
+    // `status` ('queued' | 'sent') is tracked for own messages so the UI can show
+    // delivery state and an offline-queued message can flip to sent on flush.
+    const _ingestChat = useCallback((msg, self, status) => {
         if (!msg || msg.kind !== 'chat' || !msg.id) return;
         if (seenMsgRef.current.has(msg.id)) return;
         seenMsgRef.current.add(msg.id);
@@ -62,8 +66,37 @@ export function useRoom() {
             text: String(msg.text ?? ''),
             ts: msg.ts || Date.now(),
             self: Boolean(self),
+            status: self ? (status || 'queued') : undefined,
         }]);
     }, []);
+
+    // Send a frame to every open peer channel. Returns the number of peers reached.
+    const _deliver = useCallback((msg) => {
+        const frame = JSON.stringify(msg);
+        let n = 0;
+        for (const channel of chatChannelsRef.current.values()) {
+            if (channel.readyState === 'open') {
+                try { channel.send(frame); n++; } catch { /* peer dropped */ }
+            }
+        }
+        return n;
+    }, []);
+
+    const _markSent = useCallback((id) => {
+        setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status: 'sent' } : m)));
+    }, []);
+
+    // Try to deliver any queued (offline) messages. Called when a peer channel opens,
+    // when the browser reports it's back online, and on a periodic retry tick.
+    const _flushOutbox = useCallback(() => {
+        if (!outboxRef.current.length) return;
+        const remaining = [];
+        for (const msg of outboxRef.current) {
+            if (_deliver(msg) > 0) _markSent(msg.id);
+            else remaining.push(msg);
+        }
+        outboxRef.current = remaining;
+    }, [_deliver, _markSent]);
 
     const _buildRoom = useCallback((selfId, token, signaling) => {
         selfIdRef.current = selfId;
@@ -78,6 +111,9 @@ export function useRoom() {
                 try { msg = JSON.parse(event.data); } catch { return; }
                 _ingestChat(msg, false);
             };
+            // This channel is wired at open time (negotiated channels call back on
+            // open) — a peer just became reachable, so drain any queued messages.
+            _flushOutbox();
         };
 
         const createPeer = (remoteId) => {
@@ -107,7 +143,17 @@ export function useRoom() {
         signaling.on('room-peer-left', (data) => room.handlePeerLeft(data));
         signaling.on('room-peer-joined', () => {});
         return room;
-    }, [_ingestChat]);
+    }, [_ingestChat, _flushOutbox]);
+
+    // Retry the offline queue: on a timer (covers ICE-restart reconnects where a
+    // channel re-opens without a fresh callback) and when the OS reports it's online.
+    useEffect(() => {
+        if (status !== 'in-room') return undefined;
+        const iv = setInterval(() => _flushOutbox(), 3000);
+        const onOnline = () => _flushOutbox();
+        window.addEventListener('online', onOnline);
+        return () => { clearInterval(iv); window.removeEventListener('online', onOnline); };
+    }, [status, _flushOutbox]);
 
     const _connect = useCallback(async () => {
         const signaling = new SignalingClient(SIGNALING_URL);
@@ -119,6 +165,7 @@ export function useRoom() {
 
     const createRoom = useCallback(async (name) => {
         setStatus('connecting'); setError(null); setMessages([]);
+        seenMsgRef.current = new Set(); outboxRef.current = [];
         selfNameRef.current = name || '';
         try {
             const signaling = await _connect();
@@ -134,6 +181,7 @@ export function useRoom() {
 
     const joinRoom = useCallback(async (code, name) => {
         setStatus('connecting'); setError(null); setMessages([]);
+        seenMsgRef.current = new Set(); outboxRef.current = [];
         selfNameRef.current = name || '';
         try {
             const signaling = await _connect();
@@ -147,7 +195,8 @@ export function useRoom() {
     }, [_connect, _buildRoom]);
 
     // Broadcast a chat message to every connected room peer over the control channel.
-    // Returns false if no peer channel is open yet (nothing was sent).
+    // If no peer is reachable (offline / nobody connected yet) the message is queued
+    // and retried automatically when connectivity returns. Returns true if delivered.
     const sendMessage = useCallback((text) => {
         const body = String(text ?? '').trim();
         if (!body || !selfIdRef.current) return false;
@@ -159,17 +208,12 @@ export function useRoom() {
             text: body,
             ts: Date.now(),
         };
-        const frame = JSON.stringify(msg);
-        let delivered = 0;
-        for (const channel of chatChannelsRef.current.values()) {
-            if (channel.readyState === 'open') {
-                try { channel.send(frame); delivered++; } catch { /* peer dropped */ }
-            }
-        }
-        // Echo locally regardless so the sender sees their own message immediately.
-        _ingestChat(msg, true);
-        return delivered > 0;
-    }, [_ingestChat]);
+        const delivered = _deliver(msg) > 0;
+        // Echo locally immediately, marked sent or queued so the UI reflects state.
+        _ingestChat(msg, true, delivered ? 'sent' : 'queued');
+        if (!delivered) outboxRef.current.push(msg); // flushed on reconnect
+        return delivered;
+    }, [_ingestChat, _deliver]);
 
     const leaveRoom = useCallback(() => {
         try { signalingRef.current?.leaveRoom(); } catch { /* ignore */ }

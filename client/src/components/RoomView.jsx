@@ -140,6 +140,14 @@ export function RoomView({ onClose }) {
                                                 maxWidth: '85%',
                                             }}
                                         >{m.text}</span>
+                                        {m.self && (
+                                            <span
+                                                className="block text-xs mt-0.5"
+                                                data-testid="room-chat-status"
+                                                title={m.status === 'sent' ? 'Sent' : 'Waiting to send — will deliver when reconnected'}
+                                                style={{ color: 'var(--text-muted)' }}
+                                            >{m.status === 'sent' ? '✓ Sent' : '🕓 Queued'}</span>
+                                        )}
                                     </div>
                                 ))}
                             </div>
