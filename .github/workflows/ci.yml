@@ -1,0 +1,159 @@
+# ──────────────────────────────────────────────────────────────────────────
+# CI — lint, unit/integration tests, dependency audit, and a blocking Trivy
+# security scan on every push/PR to main.
+#
+# Gates (all blocking):
+#   • server:  eslint + full `node --test tests/` (in-memory backends; no Redis
+#              needed — the redis-specific paths fall back and are covered by
+#              the same suites in-memory)
+#   • client:  eslint + vitest + production build
+#   • sdk/cli: `node --test` (the SDK harness reuses server/src/api/inMemoryApp,
+#              so server deps are installed first)
+#   • audit:   `npm audit --omit=dev --audit-level=high` on server and client
+#              runtime deps (dev-only toolchain advisories don't block)
+#   • trivy:   filesystem scan, HIGH/CRITICAL, exit-code 1 (BLOCKING).
+#              Suppressions live in .trivyignore.yaml — each entry needs a
+#              rationale + expiry; runtime CVEs are never suppressed.
+# ──────────────────────────────────────────────────────────────────────────
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run lint
+        working-directory: server
+      # integration.test.js needs a live signaling server — covered by the
+      # server-integration job below.
+      - run: node --test $(ls tests/*.test.js | grep -v integration.test.js)
+        working-directory: server
+
+  server-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - name: Start server
+        run: node server/src/server.js &
+        env:
+          PORT: 10000
+          REDIS_URL: redis://localhost:6379
+      - name: Wait for server
+        run: |
+          for i in {1..15}; do
+            curl -sf http://localhost:10000/health && break
+            echo "Waiting for server ($i)..."
+            sleep 1
+          done
+      - name: Run integration tests
+        run: node --test tests/integration.test.js
+        working-directory: server
+        env:
+          PORT: 10000
+
+  client-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - run: npm run lint
+        working-directory: client
+      - run: npm test
+        working-directory: client
+      - run: npm run build
+        working-directory: client
+
+  sdk-cli-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      # The SDK/CLI test harnesses import server/src/api/inMemoryApp.js, whose
+      # express/rate-limiter imports resolve against server/node_modules.
+      - run: npm ci
+        working-directory: server
+      - run: npm test
+        working-directory: sdk
+      - run: npm test
+        working-directory: cli
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Runtime dependencies only — dev toolchain advisories are tracked via
+      # Trivy + .trivyignore.yaml instead of blocking here.
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: server
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: client
+
+  security-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy filesystem scan (HIGH/CRITICAL, blocking)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          # BLOCKING: fails CI on any unsuppressed HIGH/CRITICAL finding.
+          # Suppressions require a rationale + expiry in .trivyignore.yaml.
+          exit-code: '1'
+          trivyignores: .trivyignore.yaml

@@ -1,0 +1,61 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Post-deploy smoke check — after a push to main, Render auto-deploys the
+# signaling server. This workflow waits out the deploy, then verifies the
+# production surface actually answers:
+#   • GET /health           → 200
+#   • GET /api/v1/          → version "v1"
+#   • GET /api/v1/turn-credentials → 200 with an iceServers array
+#
+# Caveat: Render doesn't tell us when the new build is live, so this waits a
+# fixed grace period and then polls. A pass means "production is up and serving
+# the expected API", not "this exact commit is live". Set the repository
+# variable KEEPWARM_URL (shared with keep-warm.yml) to your server's base URL.
+# ──────────────────────────────────────────────────────────────────────────
+name: deploy-smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wait for Render deploy to settle
+        run: sleep 180
+      - name: Smoke-check production API
+        env:
+          BASE_URL: ${{ vars.KEEPWARM_URL || 'https://linkspan-signaling.onrender.com' }}
+        run: |
+          set -euo pipefail
+          BASE="${BASE_URL%/}"
+
+          # /health — poll up to ~5 min (free tier may still be cold-starting)
+          for i in $(seq 1 20); do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 30 "$BASE/health" || true)
+            [ "$code" = "200" ] && break
+            echo "attempt $i: /health returned $code — retrying in 15s"
+            sleep 15
+          done
+          [ "$code" = "200" ] || { echo "FAIL: /health never returned 200"; exit 1; }
+          echo "OK /health"
+
+          # API discovery
+          version=$(curl -fsS --max-time 30 "$BASE/api/v1/" | jq -r .version)
+          [ "$version" = "v1" ] || { echo "FAIL: /api/v1/ version=$version"; exit 1; }
+          echo "OK /api/v1/ (version $version)"
+
+          # TURN credential endpoint — 200 with an iceServers array (may be empty
+          # when no TURN provider is configured; that's a valid deployment state).
+          turn=$(curl -fsS --max-time 30 "$BASE/api/v1/turn-credentials")
+          echo "$turn" | jq -e '.iceServers | type == "array"' > /dev/null \
+            || { echo "FAIL: /api/v1/turn-credentials malformed: $turn"; exit 1; }
+          echo "OK /api/v1/turn-credentials → $(echo "$turn" | jq -c '{servers: (.iceServers|length), ttl}')"
+
+          echo "Smoke check passed."

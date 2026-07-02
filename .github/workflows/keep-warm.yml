@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Keep-warm — pings the signaling server's /health endpoint on a schedule so the
+# free Render instance does not sleep (it sleeps after ~15 min idle and then
+# cold-starts ~50s, which makes the *next* transfer — especially a small one —
+# feel disproportionately slow). A warm server means setup latency stays in the
+# low seconds.
+#
+# Setup: set a repository variable KEEPWARM_URL to your server's base URL
+# (Settings → Secrets and variables → Actions → Variables). Falls back to the
+# default Render hostname if unset. The ping just needs to reach the box — even a
+# 503 "starting" response counts as a wake, so this step never fails the run.
+#
+# Caveat: GitHub's scheduled runs are best-effort and can be delayed (sometimes
+# 10–15 min) under load, and GitHub auto-disables schedules after 60 days of repo
+# inactivity. For a hard guarantee, point an external uptime monitor (e.g.
+# UptimeRobot, 5-min interval) at the same /health URL instead of / alongside this.
+# ──────────────────────────────────────────────────────────────────────────
+name: keep-warm
+
+on:
+  schedule:
+    # Every 10 minutes. Drop to '*/5 * * * *' if you still see cold starts from
+    # scheduling jitter pushing the gap past Render's ~15 min sleep window.
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+# Don't pile up overlapping pings if a run is slow to start.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping /health
+        env:
+          BASE_URL: ${{ vars.KEEPWARM_URL || 'https://linkspan-signaling.onrender.com' }}
+        run: |
+          URL="${BASE_URL%/}/health"
+          echo "Waking $URL"
+          # Generous timeouts: a cold start can take ~50s, so allow time to wake.
+          # --retry covers transient 5xx/connection resets during the wake.
+          code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+            --connect-timeout 15 --max-time 90 \
+            --retry 3 --retry-delay 10 --retry-all-errors \
+            "$URL" || true)
+          echo "HTTP $code"
+          # Any response (even 503 "starting") means the box is awake — the goal is
+          # reached. Never fail the workflow on a non-2xx; cold starts are expected.
