@@ -18,6 +18,7 @@ import { ShareLinkManager } from './share/ShareLinkManager.js';
 import { ApiKeyManager } from './api/ApiKeyManager.js';
 import { HttpRateLimiter } from './api/HttpRateLimiter.js';
 import { createApiRouter } from './api/ShareLinkRoutes.js';
+import { TurnCredentialProvider } from './api/TurnCredentials.js';
 import { createWebhookStore } from './webhooks/WebhookStore.js';
 import { WebhookManager } from './webhooks/WebhookManager.js';
 import { createAccountStore } from './accounts/AccountStore.js';
@@ -339,10 +340,18 @@ async function bootstrap() {
     // Attach the trusted client IP for HTTP rate limiting (mirrors WS getClientIp).
     app.use((req, _res, next) => { req.clientIp = getClientIp(req); next(); });
 
+    // Ephemeral TURN credentials (Cloudflare or self-hosted coturn static-secret);
+    // disabled unless the corresponding env is set — see api/TurnCredentials.js.
+    const turnCredentials = new TurnCredentialProvider();
+    if (turnCredentials.enabled) {
+        console.log(`[LinkSpan] TURN credential provider ready (mode=${turnCredentials.mode}, ttl=${turnCredentials.ttlSeconds}s).`);
+    }
+
     app.use(API_BASE_PATH, createApiRouter({
         shareLinks,
         apiKeys,
         httpLimiter,
+        turnCredentials,
         sessionManager,
         tokenManager,
         webhooks,

@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import { SignalingClient } from '../core/SignalingClient';
 import { PeerConnection } from '../core/PeerConnection';
+import { resolveIceServers } from '../core/IceServers';
 import { ChannelManager } from '../core/ChannelManager';
 import { RelayChannel } from '../core/RelayChannel';
 import { BatchSender } from '../transfer/BatchSender';
@@ -348,6 +349,10 @@ export function useConnection({
                     }
                 };
 
+                // Ephemeral TURN credentials from the server when configured (cached,
+                // 3s timeout, falls back to static env / STUN-only — never throws).
+                const iceServers = await resolveIceServers();
+
                 const peer = new PeerConnection({
                     onIceCandidate: (candidate) => signaling.sendIceCandidate(candidate),
 
@@ -392,7 +397,7 @@ export function useConnection({
                         // Distinct handling for permanent failure (vs transient disconnect)
                         console.warn('[useConnection] Permanent connection failure detected');
                     },
-                });
+                }, iceServers);
                 peerRef.current = peer;
                 peer.init();
 

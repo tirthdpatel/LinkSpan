@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalingClient } from '../core/SignalingClient.js';
 import { PeerConnection } from '../core/PeerConnection.js';
+import { prefetchIceServers } from '../core/IceServers.js';
 import { RoomConnection } from '../core/RoomConnection.js';
 
 const SIGNALING_URL = import.meta.env?.VITE_SIGNALING_URL || 'ws://localhost:10000';
@@ -247,6 +248,9 @@ export function useRoom() {
     }, [status, _flushOutbox]);
 
     const _connect = useCallback(async () => {
+        // Warm the ICE-server cache now: mesh peers are constructed synchronously
+        // (createPeer), so they read the cached credentials rather than awaiting.
+        prefetchIceServers();
         const signaling = new SignalingClient(SIGNALING_URL);
         signalingRef.current = signaling;
         signaling.on('error', (e) => { setError(e?.message || 'Signaling error'); setStatus('error'); });

@@ -49,7 +49,8 @@ const LINK_ID_RE = /^[a-f0-9]{32}$/;
  */
 export function createApiRouter(deps) {
     const { shareLinks, apiKeys, httpLimiter, sessionManager, tokenManager, webhooks,
-        accountManager, oauthProviders, telemetry, audit = () => {}, baseUrl = '' } = deps;
+        accountManager, oauthProviders, telemetry, turnCredentials,
+        audit = () => {}, baseUrl = '' } = deps;
     const router = express.Router();
 
     const apiLimit = httpLimiter.middleware('api');
@@ -80,6 +81,7 @@ export function createApiRouter(deps) {
                 accounts: Boolean(accountManager),
                 oauth: oauthProviders ? Object.keys(oauthProviders) : [],
                 anonymous: apiKeys.allowAnonymous,
+                turnCredentials: Boolean(turnCredentials?.enabled),
                 storageBackend: shareLinks._storage?.kind,
             },
             ...(webhooks ? { webhookEvents: WEBHOOK_EVENTS } : {}),
@@ -118,6 +120,22 @@ export function createApiRouter(deps) {
         }
         res.status(204).end();
     });
+
+    // ── Ephemeral TURN credentials ─────────────────────────────
+    // No auth: the WebRTC pairing flow runs before any account/API-key context exists,
+    // and the credentials are already short-lived + rate-limited. When no TURN provider
+    // is configured (or the upstream provider errors) this returns an empty list and the
+    // client proceeds STUN-only — never a 5xx, because TURN is an optimization.
+    router.get('/turn-credentials', apiLimit, wrap(async (_req, res) => {
+        if (!turnCredentials?.enabled) {
+            res.json({ iceServers: [], ttl: 0 });
+            return;
+        }
+        const creds = await turnCredentials.getIceServers();
+        // Cacheable client-side for a fraction of the TTL; never by shared caches.
+        res.set('Cache-Control', 'private, max-age=60');
+        res.json(creds);
+    }));
 
     // ── Create link ────────────────────────────────────────────
     router.post('/links', auth, apiKeys.requireScope('links:write'), uploadLimit, wrap(async (req, res) => {

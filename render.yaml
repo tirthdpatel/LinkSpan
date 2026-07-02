@@ -42,6 +42,13 @@ services:
       - key: RL_MAX_JOIN_ATTEMPTS_PER_MIN
         value: "60"
 
+      # Relay-chunk frames (the WebSocket fallback transfer path) have their own,
+      # separate rate-limit bucket from signaling/control messages — see
+      # MAX_RELAY_CHUNKS_PER_SEC. The default (500/sec) is plenty; only raise this
+      # if you're seeing RATE_LIMITED errors during a large relayed transfer.
+      # - key: RL_MAX_RELAY_CHUNKS_PER_SEC
+      #   value: "500"
+
       # Allow anonymous share-link creation (no API key). In production the
       # default is false, which makes the "Create a share link" UI fail with
       # "API key required". For a public portfolio demo we want anonymous use;
@@ -68,6 +75,23 @@ services:
       # Redis — Upstash Free (rediss:// TLS URL)
       - key: REDIS_URL
         sync: false
+
+      # Ephemeral TURN credentials — Cloudflare Realtime TURN (free 1 TB/month, no
+      # card). Create a TURN key in the Cloudflare dashboard (Realtime → TURN) and
+      # fill these in; the server then mints short-lived credentials at
+      # GET /api/v1/turn-credentials and the client no longer needs any VITE_TURN_*
+      # static secret in its public bundle. Leave unset to run STUN-only (the app
+      # still falls back to the WebSocket relay when direct P2P fails).
+      - key: CLOUDFLARE_TURN_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_TURN_API_TOKEN
+        sync: false
+      # Self-hosted alternative (coturn use-auth-secret): set TURN_STATIC_SECRET and
+      # TURN_URLS (comma-separated turn:/turns: URLs) instead of the Cloudflare pair.
+      # - key: TURN_STATIC_SECRET
+      #   sync: false
+      # - key: TURN_URLS
+      #   sync: false
 
       # Share-link blob storage — Supabase Storage (S3-compatible)
       - key: SHARE_STORAGE

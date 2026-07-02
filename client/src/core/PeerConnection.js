@@ -3,6 +3,7 @@ import {
     CHANNEL_CONFIG,
     BUFFERED_AMOUNT_LOW_THRESHOLD,
 } from '@shared/constants.js';
+import { getCachedIceServers } from './IceServers.js';
 
 /**
  * PeerConnection — Wraps RTCPeerConnection with ICE config, multi-channel setup,
@@ -23,13 +24,17 @@ export class PeerConnection {
      *   onIceRestartRequired?: Function
      * }} callbacks
      */
-    constructor(callbacks) {
+    /**
+     * @param {RTCIceServer[]} [iceServers] resolved list (e.g. from resolveIceServers());
+     *   defaults to the synchronous cache/static fallback.
+     */
+    constructor(callbacks, iceServers) {
         this.callbacks = callbacks;
         /** @type {RTCPeerConnection | null} */
         this.pc = null;
         /** @type {RTCDataChannel[]} */
         this.channels = [];
-        this._iceServers = this._getIceServers();
+        this._iceServers = iceServers || getCachedIceServers();
         this._sleepDetector = null;
         this._lastSeen = Date.now();
     }
@@ -229,27 +234,6 @@ export class PeerConnection {
     _configureChannel(channel) {
         channel.binaryType = 'arraybuffer';
         channel.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW_THRESHOLD;
-    }
-
-    _getIceServers() {
-        const servers = [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-        ];
-
-        const turnDomain = import.meta.env.VITE_TURN_DOMAIN || 'global.relay.metered.ca';
-        const turnUser = import.meta.env.VITE_TURN_USERNAME;
-        const turnCred = import.meta.env.VITE_TURN_CREDENTIAL;
-
-        if (turnUser && turnCred) {
-            servers.push(
-                { urls: `turn:${turnDomain}:80`, username: turnUser, credential: turnCred },
-                { urls: `turn:${turnDomain}:443`, username: turnUser, credential: turnCred },
-                { urls: `turns:${turnDomain}:443`, username: turnUser, credential: turnCred }
-            );
-        }
-
-        return servers;
     }
 
     /**

@@ -103,6 +103,20 @@ export function buildOpenApiSpec({ baseUrl = '' } = {}) {
         paths: {
             '/': { get: { tags: ['meta'], summary: 'API info & capabilities', responses: { 200: { description: 'OK' } } } },
             '/health': { get: { tags: ['meta'], summary: 'Health & store stats', responses: { 200: { description: 'OK' } } } },
+            '/turn-credentials': {
+                get: {
+                    tags: ['meta'],
+                    summary: 'Ephemeral TURN/ICE server credentials (no auth)',
+                    description: 'Short-lived ICE server list minted server-side (Cloudflare Realtime TURN or coturn static-secret). Returns { iceServers: [], ttl: 0 } when no TURN provider is configured — clients then proceed STUN-only.',
+                    responses: { 200: { description: 'ICE servers + ttl (seconds)', content: { 'application/json': { schema: {
+                        type: 'object',
+                        properties: {
+                            iceServers: { type: 'array', items: { type: 'object' } },
+                            ttl: { type: 'integer', description: 'Credential lifetime in seconds (0 = none issued)' },
+                        },
+                    } } } } },
+                },
+            },
             '/telemetry': {
                 post: {
                     tags: ['meta'],

@@ -9,7 +9,7 @@ A complete, ₹0 / no-credit-card deployment for a portfolio or college project.
 | Blob storage for share links | **Supabase Storage** (S3-compatible) | Yes (1 GB) | No |
 | Redis (rate-limit / sessions) | **Upstash** | Yes | No |
 | Postgres (optional accounts) | **Supabase Postgres** | Yes | No |
-| TURN relay (NAT traversal) | **Metered Open Relay Project** (public free TURN) | Yes (best-effort, no quota signup) | No |
+| TURN relay (NAT traversal) | **Cloudflare Realtime TURN** (ephemeral creds via server) | Yes (1 TB/month) | No |
 | STUN | Google public STUN | Yes | No |
 
 **Architecture is WebRTC-first:** actual file bytes move **peer-to-peer between
@@ -76,35 +76,50 @@ metadata survive restarts.
 
 ---
 
-## 3. TURN relay — Metered Open Relay Project (recommended, free)
+## 3. TURN relay — Cloudflare Realtime TURN (recommended, free, no card)
 
-> Note: Metered's **dashboard/account** TURN is now only a **500 MB free trial**,
-> not the 50 GB it once offered. Use Metered's separate **Open Relay Project**
-> instead — a public, always-free TURN with shared static credentials, no signup,
-> no card, no quota gate. The client builds `turn:<domain>:80/443` + `turns:443`
-> with static creds (`src/core/PeerConnection.js`), which is exactly what Open
-> Relay expects, so it's a zero-code-change drop-in.
+The server can mint **ephemeral TURN credentials** at
+`GET /api/v1/turn-credentials` (`server/src/api/TurnCredentials.js`); the client
+fetches them at connection time (`client/src/core/IceServers.js`). No TURN
+secret ships in the public JS bundle, and no `VITE_TURN_*` build-time env is
+needed.
 
-Set these on Vercel (no account needed — the credentials are public):
+**Cloudflare setup (free tier: 1 TB/month relayed, no payment method):**
 
-- `VITE_TURN_DOMAIN` = `openrelay.metered.ca`
-- `VITE_TURN_USERNAME` = `openrelayproject`
-- `VITE_TURN_CREDENTIAL` = `openrelayproject`
+1. Create a free Cloudflare account → dashboard → **Realtime → TURN** → create a
+   TURN key. You get a **Key ID** and an **API token**.
+2. Set on Render (see `render.yaml`):
+   - `CLOUDFLARE_TURN_KEY_ID`
+   - `CLOUDFLARE_TURN_API_TOKEN`
+3. Done — the server caches minted credentials (default TTL 2 h, override with
+   `TURN_CRED_TTL_SECONDS`) so the Cloudflare API is hit at most a few times per
+   TTL window, and the client caches its fetched list per page session.
+
+**Self-hosted alternative (coturn):** run the `coturn/` compose service with
+`use-auth-secret`, then set `TURN_STATIC_SECRET` (same value as coturn's
+`static-auth-secret`) and `TURN_URLS`
+(e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349`). Credentials are
+computed locally per the TURN REST-API convention — no external API involved.
+
+**Legacy static fallback:** if the endpoint is unreachable or returns empty, the
+client falls back to `VITE_TURN_DOMAIN`/`VITE_TURN_USERNAME`/`VITE_TURN_CREDENTIAL`
+build-time env (e.g. Metered's public Open Relay Project:
+domain `openrelay.metered.ca`, username/credential `openrelayproject`), and
+finally to STUN-only. Note that static creds baked into the bundle are public —
+anyone can lift them, which is exactly why the ephemeral path exists.
 
 Why TURN: STUN (free, Google) handles most NATs, but when both peers are behind
 strict/symmetric NAT, direct P2P fails and the connection needs a TURN relay.
 Without TURN those specific transfers fall back to the server relay (capped at
 100 MB — see §6).
 
-Security note: Open Relay is a blind packet relay below the encryption layers.
-Files are encrypted twice — app-layer AES-256-GCM (key derived via ECDH between
-the two browsers, never transmitted) and then WebRTC DTLS. The TURN operator
-holds neither key and only ever sees doubly-encrypted ciphertext.
+Security note: any TURN server is a blind packet relay below the encryption
+layers. Files are encrypted twice — app-layer AES-256-GCM (key derived via ECDH
+between the two browsers, never transmitted) and then WebRTC DTLS. The TURN
+operator holds neither key and only ever sees doubly-encrypted ciphertext.
 
-Tradeoff: Open Relay is community/best-effort (no SLA). Fine for a portfolio/
-demo. If you outgrow it, Cloudflare Realtime TURN has a larger free tier but
-issues **short-lived dynamic** credentials via API — the client currently only
-supports static creds baked at build time, so that path needs a code change.
+Running without TURN entirely is also fine for a demo: ~80–90% of peers connect
+via STUN, and the rest use the WebSocket server relay (slower, size-capped).
 
 ---
 
@@ -148,9 +163,9 @@ security headers, CSP that already allows `wss:`).
 2. Set **Root Directory** to `client`. Vercel auto-detects Vite.
 3. Add **Environment Variables** (Production):
    - `VITE_SIGNALING_URL` = `wss://<your-render-host>.onrender.com`  ← must be `wss://`
-   - `VITE_TURN_DOMAIN` = `openrelay.metered.ca`  (Open Relay Project — see §3)
-   - `VITE_TURN_USERNAME` = `openrelayproject`
-   - `VITE_TURN_CREDENTIAL` = `openrelayproject`
+   - (optional legacy fallback — see §3; not needed when the server has
+     Cloudflare TURN configured) `VITE_TURN_DOMAIN` / `VITE_TURN_USERNAME` /
+     `VITE_TURN_CREDENTIAL`
 4. **Deploy.** Copy the resulting URL (e.g. `https://linkspan.vercel.app`).
 5. Go back to Render → set `CORS_ORIGIN` and `SHARE_VIEW_URL` to that exact URL
    (no trailing slash) → **Manual Deploy / Save**. The client and server now
@@ -230,10 +245,12 @@ Other limitations to be aware of:
   within it.
 - **Supabase free storage = 1 GB**; projects pause after ~1 week of total
   inactivity (just reopen the dashboard to resume).
-- **Open Relay Project TURN** is public/best-effort with no signup quota, but no
-  SLA — it can be slow or briefly unavailable. Only relayed connections use it;
-  direct P2P transfers don't touch it. (Metered's *account* TURN is now just a
-  500 MB trial — see §3 for why Open Relay is used instead.)
+- **Cloudflare Realtime TURN** free tier is 1 TB/month of relayed traffic — and
+  only TURN-relayed connections consume it; direct P2P transfers don't touch it.
+  Credentials are ephemeral (minted by the signaling server), so nothing to
+  rotate if the repo or bundle leaks. (Metered's *account* TURN is now just a
+  500 MB trial; their public Open Relay Project still works as the static
+  fallback — see §3.)
 - **No custom domain TLS work needed** — Vercel and Render both give HTTPS/WSS
   on their default domains automatically.
 

@@ -215,3 +215,43 @@ describe('REST API', () => {
         assert.equal(after.rejected, before.rejected + 1);
     });
 });
+
+// ── Ephemeral TURN credentials ─────────────────────────────────
+describe('GET /turn-credentials', () => {
+    it('returns the disabled shape when no TURN provider is configured', async () => {
+        const res = await fetch(`${base}/turn-credentials`);
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { iceServers: [], ttl: 0 });
+    });
+
+    it('serves minted credentials when a provider is wired in', async () => {
+        const { TurnCredentialProvider } = await import('../src/api/TurnCredentials.js');
+        const provider = new TurnCredentialProvider({
+            env: {
+                TURN_STATIC_SECRET: 'itest-turn-secret',
+                TURN_URLS: 'turn:turn.test:3478',
+                TURN_CRED_TTL_SECONDS: '300',
+            },
+        });
+        const built = createInMemoryApiApp({ apiKeySecret: 'itest-secret', turnCredentials: provider });
+        const srv = http.createServer(built.app);
+        await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+        try {
+            const port = srv.address().port;
+            const res = await fetch(`http://127.0.0.1:${port}/api/v1/turn-credentials`);
+            assert.equal(res.status, 200);
+            const json = await res.json();
+            assert.equal(json.ttl, 300);
+            assert.equal(json.iceServers.length, 1);
+            assert.deepEqual(json.iceServers[0].urls, ['turn:turn.test:3478']);
+            assert.match(json.iceServers[0].username, /^\d+:linkspan$/);
+            assert.ok(json.iceServers[0].credential);
+
+            // capability discovery reflects it
+            const info = await (await fetch(`http://127.0.0.1:${port}/api/v1/`)).json();
+            assert.equal(info.capabilities.turnCredentials, true);
+        } finally {
+            srv.close();
+        }
+    });
+});

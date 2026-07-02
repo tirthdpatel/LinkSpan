@@ -34,7 +34,7 @@ import { API_BASE_PATH } from '../../../shared/constants.js';
  * @returns {{ app: import('express').Express, apiKeys: ApiKeyManager, shareLinks: ShareLinkManager }}
  */
 export function createInMemoryApiApp(opts = {}) {
-    const { apiKeySecret = 'in-memory-secret', allowAnonymous = true, baseUrl = '', webhooks, oauthProviders } = opts;
+    const { apiKeySecret = 'in-memory-secret', allowAnonymous = true, baseUrl = '', webhooks, oauthProviders, turnCredentials } = opts;
 
     const app = express();
     app.use(express.json({ limit: '16kb' }));
@@ -64,6 +64,7 @@ export function createInMemoryApiApp(opts = {}) {
         accountManager,
         oauthProviders: oauthProviders || {},
         telemetry,
+        turnCredentials,
         baseUrl,
     }));
 
