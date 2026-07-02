@@ -3,6 +3,7 @@ import {
     MAX_CONNECTIONS_PER_MIN,
     MAX_SESSIONS_PER_HOUR,
     MAX_MESSAGES_PER_SEC,
+    MAX_RELAY_CHUNKS_PER_SEC,
     MAX_JOIN_ATTEMPTS_PER_MIN,
 } from '../../shared/constants.js';
 
@@ -61,6 +62,14 @@ export class RateLimiter {
             keyPrefix: 'join',
         });
 
+        // Relay-chunk limiter: separate, higher-throughput budget for the
+        // server-relay fallback path (see MAX_RELAY_CHUNKS_PER_SEC).
+        this.relayChunkLimiter = make({
+            points: opts.maxRelayChunksPerSec || MAX_RELAY_CHUNKS_PER_SEC,
+            duration: 1,
+            keyPrefix: 'relaychunk',
+        });
+
         this.backend = redisClient ? 'redis' : 'memory';
     }
 
@@ -115,6 +124,20 @@ export class RateLimiter {
     async allowJoinAttempt(ip) {
         try {
             await this.joinLimiter.consume(ip);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Check if a relay-chunk frame from this IP is allowed.
+     * @param {string} ip
+     * @returns {Promise<boolean>}
+     */
+    async allowRelayChunk(ip) {
+        try {
+            await this.relayChunkLimiter.consume(ip);
             return true;
         } catch {
             return false;

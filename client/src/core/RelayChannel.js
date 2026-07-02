@@ -1,4 +1,4 @@
-import { MSG } from '@shared/constants.js';
+import { MSG, SEND_HIGH_WATER_MARK } from '@shared/constants.js';
 
 /**
  * RelayChannel — Drop-in replacement for ChannelManager when WebRTC is unavailable.
@@ -105,6 +105,14 @@ export class RelayChannel {
     async send(channelIndex, data) {
         if (!this._connected) throw new Error('RelayChannel not connected');
 
+        // Backpressure: the relay path has no per-channel drain event, so gate on the
+        // WebSocket's own send buffer. With the larger receiver pull-window a burst of
+        // chunks would otherwise pile base64 frames into ws.bufferedAmount unbounded;
+        // yield until the socket has drained below the high-water mark before queuing
+        // more. Binary frames are ~33% larger once base64-encoded, which this accounts
+        // for naturally by measuring the actual buffered bytes.
+        await this._awaitWsDrain();
+
         if (typeof data === 'string') {
             // Text control message (FILE_META, CHUNK_REQUEST, etc.)
             this._signaling.sendRelayChunk(channelIndex, data, true);
@@ -115,6 +123,29 @@ export class RelayChannel {
             this._signaling.sendRelayChunk(channelIndex, b64, false, data.byteLength);
             this._stats.bytes += data.byteLength;
         }
+    }
+
+    /**
+     * Resolve once the WebSocket send buffer has drained below the high-water mark.
+     * The browser WebSocket has no drain event, so poll bufferedAmount on a short
+     * timer. Bails immediately if the socket is missing or no longer open so a send
+     * never hangs on a dead connection (the caller's send will then throw/no-op).
+     * @returns {Promise<void>}
+     */
+    _awaitWsDrain() {
+        const ws = this._signaling.getWebSocket();
+        if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve();
+        if (ws.bufferedAmount <= SEND_HIGH_WATER_MARK) return Promise.resolve();
+        return new Promise((resolve) => {
+            const poll = setInterval(() => {
+                const sock = this._signaling.getWebSocket();
+                if (!sock || sock.readyState !== WebSocket.OPEN ||
+                    sock.bufferedAmount <= SEND_HIGH_WATER_MARK) {
+                    clearInterval(poll);
+                    resolve();
+                }
+            }, 20);
+        });
     }
 
     /**

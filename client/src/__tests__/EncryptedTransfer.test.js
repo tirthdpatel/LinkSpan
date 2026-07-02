@@ -129,6 +129,47 @@ describe('Encrypted Sender → Receiver round-trip', () => {
         expect(got).toEqual(original);
     });
 
+    test('a single-chunk file finalizes without a manifest round-trip', async () => {
+        const original = randomBytes(8 * 1024); // well under one chunk
+        const file = new File([original], 'small.bin', { type: 'application/octet-stream' });
+
+        const { keyA, keyB } = await deriveSessionKeys();
+        const [senderEp, receiverEp] = makeChannelPair();
+
+        const sender = new Sender(file, senderEp, () => {}, null, () => {}, keyA);
+        const fileMeta = sender.getFileMeta();
+        expect(fileMeta.totalChunks).toBe(1);
+
+        // Record every control frame the receiver emits so we can prove it never
+        // asks for the whole-file manifest on the single-chunk fast path.
+        const receiverSent = [];
+        const origDispatch = receiverEp._dispatch.bind(receiverEp);
+        receiverEp._dispatch = (data) => {
+            if (typeof data === 'string') receiverSent.push(data);
+            origDispatch(data);
+        };
+
+        const storage = makeStorage();
+        const resume = makeResume(fileMeta.totalChunks);
+
+        const blob = await new Promise((resolve, reject) => {
+            const receiver = new Receiver(
+                fileMeta, receiverEp, storage, resume,
+                () => {}, resolve, reject, null, keyB
+            );
+            sender.start();
+            receiver.start();
+        });
+
+        const got = new Uint8Array(await blob.arrayBuffer());
+        expect(got).toEqual(original);
+        // The latency win: no MANIFEST_REQUEST was sent.
+        const askedForManifest = receiverSent.some((m) => {
+            try { return JSON.parse(m).type === 'manifest-request'; } catch { return false; }
+        });
+        expect(askedForManifest).toBe(false);
+    });
+
     test('bytes on the wire are ciphertext, not plaintext', async () => {
         const original = randomBytes(300 * 1024); // 2 encrypted chunks
         const file = new File([original], 'secret.bin');

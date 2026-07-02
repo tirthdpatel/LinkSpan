@@ -281,10 +281,22 @@ export class Receiver {
         const speed = elapsed > 0 ? this._bytesReceived / elapsed : 0;
         this.onProgress(Math.round(received), this.totalChunks, speed, index);
 
-        // All chunks present — request the whole-file manifest and verify before
-        // declaring success. We do NOT finalize on chunk count alone.
+        // All chunks present — verify before declaring success. We do NOT finalize on
+        // chunk count alone.
         if (this.resumeManager.isComplete(this.fileMeta.fileId)) {
-            this._requestManifest();
+            // Fast path for single-chunk files (the common "small file" case): the
+            // whole-file manifest root over one chunk is just a function of that
+            // chunk's hash, which the sender already committed in CHUNK_DATA and we
+            // already verified against the decrypted bytes above. There is no
+            // reordering or missing-chunk substitution to catch, so the manifest
+            // request/response adds a full round-trip of latency with no extra
+            // assurance. Skip it and finalize immediately. Multi-chunk files still
+            // verify the Merkle root.
+            if (this.totalChunks <= 1) {
+                this._finalize(null);
+            } else {
+                this._requestManifest();
+            }
             return;
         }
 

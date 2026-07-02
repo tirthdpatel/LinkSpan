@@ -10,6 +10,7 @@ describe('RateLimiter', () => {
             maxConnectionsPerMin: 3,
             maxSessionsPerHour: 2,
             maxMessagesPerSec: 5,
+            maxRelayChunksPerSec: 3,
         });
     });
 
@@ -60,6 +61,31 @@ describe('RateLimiter', () => {
                 await limiter.allowMessage('8.8.8.8');
             }
             assert.equal(await limiter.allowMessage('8.8.8.8'), false);
+        });
+    });
+
+    describe('allowRelayChunk', () => {
+        it('allows relay chunks within their own limit', async () => {
+            for (let i = 0; i < 3; i++) {
+                assert.equal(await limiter.allowRelayChunk('9.9.9.9'), true);
+            }
+        });
+
+        it('blocks relay chunks over their own limit', async () => {
+            for (let i = 0; i < 3; i++) {
+                await limiter.allowRelayChunk('10.10.10.10');
+            }
+            assert.equal(await limiter.allowRelayChunk('10.10.10.10'), false);
+        });
+
+        it('is independent of the message limiter budget', async () => {
+            // Exhaust the (lower) message budget for this IP...
+            for (let i = 0; i < 5; i++) {
+                await limiter.allowMessage('11.11.11.11');
+            }
+            assert.equal(await limiter.allowMessage('11.11.11.11'), false);
+            // ...relay chunks for the same IP still have their own budget.
+            assert.equal(await limiter.allowRelayChunk('11.11.11.11'), true);
         });
     });
 });

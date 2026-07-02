@@ -40,7 +40,20 @@ export function pickChunkSize(fileSize, encrypted = true) {
     return max;                                                          // large    → max
 }
 export const MAX_CHANNELS = 7;
-export const MAX_IN_FLIGHT = 7;
+// Receiver pull-window: how many chunks may be requested but not yet received at
+// once. This is the bandwidth-delay-product lever — throughput is roughly
+// (MAX_IN_FLIGHT × chunkSize) / RTT, so a window of 7 × 256 KB = 1.75 MB caps a
+// high-RTT (TURN/relayed) path well below the link's capacity. 24 × 256 KB = 6 MB
+// keeps the pipe full on those paths while staying a bounded amount of receiver
+// memory. Direct-LAN transfers were never window-limited, so this doesn't hurt them.
+export const MAX_IN_FLIGHT = 24;
+// How many chunks the sender prepares (read → hash → encrypt) and sends
+// concurrently when serving a range request. The previous strictly-serial loop
+// left the CPU idle during each chunk's async crypto and the channels idle during
+// each other's sends; a small worker pool overlaps that work across the parallel
+// data channels. Kept modest so crypto/CPU contention and channel backpressure
+// stay bounded.
+export const SENDER_CONCURRENCY = 4;
 export const MAX_RETRY_COUNT = 5;
 export const STALL_TIMEOUT_MS = 10_000; // 10 s — no chunk received → stalled
 
@@ -207,6 +220,12 @@ export const RESUME_FLUSH_MAX_WAIT_MS = 1000;
 export const MAX_CONNECTIONS_PER_MIN = 10;
 export const MAX_SESSIONS_PER_HOUR = 5;
 export const MAX_MESSAGES_PER_SEC = 100;
+// Relay-chunk frames get their own, much larger budget than signaling/control
+// messages: a real transfer legitimately sends two frames (hash + binary) per
+// chunk, hundreds of times per second, and gating that on the same 100/sec
+// bucket as signaling chatter throttled the server-relay fallback path well
+// below what the socket could actually carry.
+export const MAX_RELAY_CHUNKS_PER_SEC = 500;
 export const MAX_JOIN_ATTEMPTS_PER_MIN = 10;
 export const MAX_MESSAGE_SIZE = 64 * 1024; // 64 KB cap for control/signaling messages
 
@@ -469,3 +488,9 @@ export const CHANNEL_CONFIG = {
 };
 
 export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB
+// High-water mark for per-channel send backpressure. send() blocks once a
+// channel's bufferedAmount exceeds this, then resumes on bufferedamountlow. At
+// 256 KB chunks the old limit (BUFFERED_AMOUNT_LOW_THRESHOLD × 4 = 256 KB) drained
+// after a single buffered chunk, so a fast link kept stalling between chunks. 1 MB
+// lets a channel hold a few chunks in its send buffer and stay saturated.
+export const SEND_HIGH_WATER_MARK = 1024 * 1024; // 1 MB

@@ -367,7 +367,12 @@ async function bootstrap() {
     server = http.createServer(app);
     // maxPayload must fit a relay-chunk frame (base64 of a ~256 KB chunk ≈ 350 KB).
     // Control/signaling messages are separately capped at MAX_MESSAGE_SIZE below.
-    wss = new WebSocketServer({ server, maxPayload: MAX_RELAY_FRAME_SIZE });
+    // perMessageDeflate disabled: relay-chunk payloads are base64 of (usually
+    // AES-256-GCM encrypted) chunk data — high-entropy and effectively
+    // incompressible, so negotiating deflate just burns CPU on every relayed
+    // frame for ~0% size reduction. That CPU cost is real on Render's free-tier
+    // shared CPU and was competing with the relay's own throughput.
+    wss = new WebSocketServer({ server, maxPayload: MAX_RELAY_FRAME_SIZE, perMessageDeflate: false });
 
     // ── WebSocket Connection Handler ───────────────────────────
     wss.on('connection', async (ws, req) => {
@@ -412,13 +417,6 @@ async function bootstrap() {
         const pendingFrames = [];
 
         const handleMessage = async (raw) => {
-            // Rate-limit messages
-            const msgAllowed = await rateLimiter.allowMessage(ip);
-            if (!msgAllowed) {
-                sendError(ws, ERR.RATE_LIMITED, 'Message rate exceeded.');
-                return;
-            }
-
             // Frame-size policy: only relay-chunk frames may use the large maxPayload
             // budget. Everything else (signaling/control) is held to MAX_MESSAGE_SIZE
             // so the relay allowance can't be abused for control-message flooding.
@@ -435,6 +433,19 @@ async function bootstrap() {
 
             if (!data || typeof data.type !== 'string') {
                 sendError(ws, ERR.INVALID_MESSAGE, 'Missing or invalid message type.');
+                return;
+            }
+
+            // Rate-limit messages. Relay-chunk frames get their own, higher-throughput
+            // bucket (MAX_RELAY_CHUNKS_PER_SEC) — a real transfer legitimately sends
+            // hundreds of chunk frames per second, and gating that on the same budget
+            // as signaling/control messages throttled the server-relay fallback path
+            // well below what the socket could actually carry.
+            const msgAllowed = data.type === MSG.RELAY_CHUNK
+                ? await rateLimiter.allowRelayChunk(ip)
+                : await rateLimiter.allowMessage(ip);
+            if (!msgAllowed) {
+                sendError(ws, ERR.RATE_LIMITED, 'Message rate exceeded.');
                 return;
             }
 

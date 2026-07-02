@@ -130,6 +130,13 @@ export function useConnection({
     // True once the transfer fell back to (or was forced onto) the server relay — used
     // only to tag opt-in aggregate telemetry as p2p vs relay.
     const relayActiveRef = useRef(false);
+    // Guards against duplicate/concurrent receive joins. The pairing UI auto-submits
+    // when all six digits are filled AND exposes a manual "Join Session" button, so a
+    // normal "type then click" fires handleReceive twice. The first join takes the
+    // session's second (and last) peer slot; the second then fails with "session full"
+    // and clobbers the live connection's UI state to FAILED. This flag drops the
+    // redundant calls. Reset on cleanup and on a failed attempt so a genuine retry works.
+    const receiveInFlightRef = useRef(false);
 
     const remembered = () => (rememberedRef.current ??= new RememberedDevices());
     const history = () => (historyRef.current ??= new HistoryManager());
@@ -138,6 +145,7 @@ export function useConnection({
     // ── Cleanup ─────────────────────────────────────────────────
 
     const cleanup = useCallback(() => {
+        receiveInFlightRef.current = false;
         senderRef.current?.stop();
         receiverRef.current?.stop();
         channelManagerRef.current?.closeAll();
@@ -621,6 +629,14 @@ export function useConnection({
     // ── Receive Batch ────────────────────────────────────────────
 
     const handleReceive = useCallback(async (code) => {
+        // Drop duplicate/concurrent joins (auto-submit + manual "Join Session" click,
+        // or re-typing a digit once all six are filled). A second join on a session
+        // that already has both peers fails with "session full" and would otherwise
+        // flip the live connection's UI to FAILED. Set synchronously before any await
+        // so the redundant call is rejected before it can open a second WebSocket.
+        if (receiveInFlightRef.current) return;
+        receiveInFlightRef.current = true;
+
         setView('receive');
         transferStartRef.current = Date.now();
         relayActiveRef.current = false;
@@ -780,6 +796,8 @@ export function useConnection({
             );
             receiverRef.current = batchReceiver;
         } catch (err) {
+            // Allow a genuine retry after a real connection/join failure.
+            receiveInFlightRef.current = false;
             if (err?.message) setError({ message: err.message });
         }
     }, [initConnection, setView, setDiagnostics, setTransferProgress, setTransferState, setCurrentFileIndex, setError, onTransferComplete, waitForSasConfirmation, waitForReceiveApproval, _recordHistory]);

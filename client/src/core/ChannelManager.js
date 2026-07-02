@@ -1,6 +1,5 @@
 import {
-    MAX_CHANNELS,
-    BUFFERED_AMOUNT_LOW_THRESHOLD,
+    SEND_HIGH_WATER_MARK,
 } from '@shared/constants.js';
 
 /**
@@ -93,8 +92,10 @@ export class ChannelManager {
             throw new Error(`Channel ${channelIndex} is not open`);
         }
 
-        // Backpressure: wait if buffer is full
-        if (ch.bufferedAmount > BUFFERED_AMOUNT_LOW_THRESHOLD * 4) {
+        // Backpressure: wait if the channel's send buffer is above the high-water
+        // mark, then resume on the bufferedamountlow event. A higher mark lets each
+        // channel hold several chunks and stay saturated on a fast link.
+        if (ch.bufferedAmount > SEND_HIGH_WATER_MARK) {
             await this._waitForDrain(channelIndex);
         }
 

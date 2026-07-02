@@ -16,7 +16,7 @@ import { RedisBruteForceGuard } from './RedisBruteForceGuard.js';
  * Rate-limit thresholds may be overridden via env (handy for load/e2e testing
  * where many flows originate from a single IP):
  *   RL_MAX_CONNECTIONS_PER_MIN, RL_MAX_SESSIONS_PER_HOUR,
- *   RL_MAX_MESSAGES_PER_SEC, RL_MAX_JOIN_ATTEMPTS_PER_MIN
+ *   RL_MAX_MESSAGES_PER_SEC, RL_MAX_JOIN_ATTEMPTS_PER_MIN, RL_MAX_RELAY_CHUNKS_PER_SEC
  *
  * @returns {Promise<{ rateLimiter: RateLimiter, bruteForce: object }>}
  */
@@ -27,6 +27,7 @@ function rateLimitOptsFromEnv() {
         maxSessionsPerHour: num(process.env.RL_MAX_SESSIONS_PER_HOUR),
         maxMessagesPerSec: num(process.env.RL_MAX_MESSAGES_PER_SEC),
         maxJoinAttemptsPerMin: num(process.env.RL_MAX_JOIN_ATTEMPTS_PER_MIN),
+        maxRelayChunksPerSec: num(process.env.RL_MAX_RELAY_CHUNKS_PER_SEC),
     };
     // Drop undefined keys so RateLimiter falls back to its constant defaults.
     for (const k of Object.keys(opts)) if (opts[k] === undefined) delete opts[k];

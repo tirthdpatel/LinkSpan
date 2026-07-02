@@ -5,6 +5,7 @@ import { CryptoEngine } from '../crypto/CryptoEngine.js';
 import {
     TRANSFER_MSG,
     MAX_RETRY_COUNT,
+    SENDER_CONCURRENCY,
     pickChunkSize,
 } from '@shared/constants.js';
 import { validateRanges, rangesToChunks } from '@shared/chunkRanges.js';
@@ -211,10 +212,28 @@ export class Sender {
             return; // ignore the bad frame; receiver will re-request / stall-recover
         }
 
-        for (const index of rangesToChunks(normalized)) {
-            if (!this._active || this._paused) break;
-            await this._handleChunkRequest(index);
+        // Serve the requested chunks with bounded concurrency rather than strictly
+        // one-at-a-time. The old serial loop left the CPU idle during each chunk's
+        // async read/hash/encrypt and the data channels idle during each other's
+        // sends; SENDER_CONCURRENCY workers pull from a shared cursor so several
+        // chunks are prepared and in flight across the channels at once. Per-chunk
+        // ordering (hash frame then binary, on the same channel) is unchanged, and
+        // ChannelManager.send still applies per-channel backpressure, so this bounds
+        // memory while keeping the link saturated.
+        const indices = rangesToChunks(normalized);
+        let cursor = 0;
+        const worker = async () => {
+            while (this._active && !this._paused) {
+                const i = cursor++;
+                if (i >= indices.length) return;
+                await this._handleChunkRequest(indices[i]);
+            }
+        };
+        const workers = [];
+        for (let w = 0; w < Math.min(SENDER_CONCURRENCY, indices.length); w++) {
+            workers.push(worker());
         }
+        await Promise.all(workers);
     }
 
     /**
