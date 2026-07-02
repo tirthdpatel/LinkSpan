@@ -31,16 +31,28 @@ import { TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE } from '@shared/constants.j
  * @param {{ onMessage: Function, sendAny: Function }} cm - channel manager or relay
  * @returns {Promise<{ key: CryptoKey, sas: string }>}
  */
-function performKeyExchange(cm) {
+// Generous timeout: on a cross-continent relay fallback the two peers can join the
+// relay tens of seconds apart (each waits for its own ICE to fail first), and the
+// retransmit loop below needs room to bridge that gap.
+const KEY_EXCHANGE_TIMEOUT_MS = 45_000;
+// Handshake frames sent before the other peer has switched onto the relay are
+// silently dropped, so the public key is retransmitted until the exchange settles.
+const KEY_EXCHANGE_RETRANSMIT_MS = 2_000;
+
+export function performKeyExchange(cm) {
     return new Promise((resolve, reject) => {
         let settled = false;
-        const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+        let retransmit = null;
+        const stopRetransmit = () => { if (retransmit) { clearInterval(retransmit); retransmit = null; } };
+        const fail = (err) => { if (!settled) { settled = true; stopRetransmit(); reject(err); } };
 
-        const timeout = setTimeout(() => fail(new Error('Key exchange timed out')), 15_000);
+        const timeout = setTimeout(() => fail(new Error('Key exchange timed out')), KEY_EXCHANGE_TIMEOUT_MS);
 
         CryptoEngine.generateECDHKeyPair()
             .then(async (keyPair) => {
                 const ourPub = await CryptoEngine.exportPublicKey(keyPair);
+                const sendPub = () =>
+                    cm.sendAny(JSON.stringify({ type: TRANSFER_MSG.KEY_EXCHANGE, pub: ourPub }));
 
                 const handler = async (rawData) => {
                     if (settled || typeof rawData !== 'string') return;
@@ -50,8 +62,17 @@ function performKeyExchange(cm) {
                     try {
                         const key = await CryptoEngine.deriveSharedKey(keyPair, msg.pub);
                         const sas = await CryptoEngine.computeSAS(ourPub, msg.pub);
+                        if (settled) return; // a concurrent duplicate frame won the race
                         settled = true;
+                        stopRetransmit();
                         clearTimeout(timeout);
+                        // Echo our key once more before finishing: receiving the peer's key
+                        // proves THEY are on the channel, but not that they ever received
+                        // OURS (every earlier copy may have been dropped while they were
+                        // still switching onto the relay). Duplicates are harmless — the
+                        // peer's handler settles once and later frames fall through the
+                        // typed message switches unhandled.
+                        try { await sendPub(); } catch { /* channel gone — peer will time out */ }
                         cm.onMessage(null); // release the handshake handler
                         resolve({ key, sas });
                     } catch (err) {
@@ -61,7 +82,10 @@ function performKeyExchange(cm) {
                 };
                 cm.onMessage(handler);
 
-                await cm.sendAny(JSON.stringify({ type: TRANSFER_MSG.KEY_EXCHANGE, pub: ourPub }));
+                await sendPub();
+                retransmit = setInterval(() => {
+                    Promise.resolve(sendPub()).catch(() => { /* retried on next tick */ });
+                }, KEY_EXCHANGE_RETRANSMIT_MS);
             })
             .catch((err) => {
                 clearTimeout(timeout);
@@ -493,9 +517,20 @@ export function useConnection({
                 });
 
                 signaling.on('relay-ready', () => {
-                    // Handled by RelayChannel.activate() — but also update diagnostics
                     relayActiveRef.current = true;
                     setDiagnostics((prev) => ({ ...prev, relayMode: true }));
+                    // The server broadcasts relay-ready to BOTH peers when either one
+                    // requests the relay. If the OTHER peer fell back first (its ICE
+                    // failed before ours — common cross-continent, where the two sides
+                    // give up tens of seconds apart), we must switch onto the relay too:
+                    // our own 'failed' event may be much later or never fire (stuck in
+                    // 'disconnected'), and until we listen, every relay chunk the peer
+                    // sends is silently dropped. activateRelay is idempotent — when this
+                    // event is the response to our own request, or a repeat broadcast,
+                    // the relayActivating/channel-ready guards make it a no-op.
+                    activateRelay().catch((err) => {
+                        console.error('[useConnection] Relay activation on relay-ready failed:', err.message);
+                    });
                 });
 
                 signaling.on('error', (err) => {

@@ -383,9 +383,31 @@ async function bootstrap() {
     // shared CPU and was competing with the relay's own throughput.
     wss = new WebSocketServer({ server, maxPayload: MAX_RELAY_FRAME_SIZE, perMessageDeflate: false });
 
+    // ── WebSocket Heartbeat ────────────────────────────────────
+    // Hosting proxies (Render's included) silently drop WebSockets with no
+    // traffic for ~60s. The pairing flow has exactly such gaps: the sender idles
+    // while the receiver types the code, confirms the SAS, accepts the transfer.
+    // A reaped socket fires 'close' → SESSION_CLOSED → the other peer sees
+    // "Session closed by the other peer" for no real reason. Protocol-level pings
+    // keep the socket non-idle (browsers auto-reply with pong, no client code
+    // needed) and detect genuinely dead peers: miss one pong window and the
+    // socket is terminated so the session tears down promptly instead of
+    // lingering until the TCP stack notices.
+    const WS_HEARTBEAT_INTERVAL_MS = 30_000;
+    const heartbeat = setInterval(() => {
+        for (const ws of wss.clients) {
+            if (ws.isAlive === false) { ws.terminate(); continue; }
+            ws.isAlive = false;
+            try { ws.ping(); } catch { /* socket already closing */ }
+        }
+    }, WS_HEARTBEAT_INTERVAL_MS);
+    wss.on('close', () => clearInterval(heartbeat));
+
     // ── WebSocket Connection Handler ───────────────────────────
     wss.on('connection', async (ws, req) => {
         const ip = getClientIp(req);
+        ws.isAlive = true;
+        ws.on('pong', () => { ws.isAlive = true; });
 
         const peerId = uuidv4();
         let boundSessionId = null;
