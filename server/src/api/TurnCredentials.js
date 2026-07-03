@@ -18,6 +18,12 @@
  *                  convention: username = "<unixExpiry>:linkspan", credential =
  *                  base64(HMAC-SHA1(secret, username)). No network call, no cache needed.
  *
+ *   static-creds   TURN_USERNAME + TURN_CREDENTIAL + TURN_URLS set. Fixed credentials
+ *                  from providers without an ephemeral API (ExpressTURN, Metered's
+ *                  Open Relay, …) served as-is. Weakest option — the credentials are
+ *                  long-lived and the endpoint is public — but they live in server
+ *                  env instead of the client bundle, so rotation needs no rebuild.
+ *
  *   disabled       Neither configured. getIceServers() resolves { iceServers: [], ttl: 0 }
  *                  and the client falls back to STUN-only (+ its own WS relay fallback).
  *
@@ -48,6 +54,8 @@ export class TurnCredentialProvider {
         this._cfKeyId = env.CLOUDFLARE_TURN_KEY_ID || '';
         this._cfToken = env.CLOUDFLARE_TURN_API_TOKEN || '';
         this._staticSecret = env.TURN_STATIC_SECRET || '';
+        this._staticUser = env.TURN_USERNAME || '';
+        this._staticCred = env.TURN_CREDENTIAL || '';
         this._staticUrls = (env.TURN_URLS || '')
             .split(',')
             .map((u) => u.trim())
@@ -55,6 +63,7 @@ export class TurnCredentialProvider {
 
         if (this._cfKeyId && this._cfToken) this.mode = 'cloudflare';
         else if (this._staticSecret && this._staticUrls.length) this.mode = 'static-secret';
+        else if (this._staticUser && this._staticCred && this._staticUrls.length) this.mode = 'static-creds';
         else this.mode = 'disabled';
 
         /** @type {{ iceServers: object[], ttl: number, expiresAt: number } | null} */
@@ -75,6 +84,19 @@ export class TurnCredentialProvider {
     async getIceServers() {
         if (this.mode === 'disabled') return { iceServers: [], ttl: 0 };
         if (this.mode === 'static-secret') return this._staticSecretServers();
+        if (this.mode === 'static-creds') {
+            // Fixed provider-issued credentials (e.g. ExpressTURN, Open Relay).
+            // Not ephemeral, but served from server env rather than baked into the
+            // client bundle — rotating them is a Render env edit, not a redeploy.
+            return {
+                iceServers: [{
+                    urls: this._staticUrls,
+                    username: this._staticUser,
+                    credential: this._staticCred,
+                }],
+                ttl: this.ttlSeconds,
+            };
+        }
 
         // cloudflare — serve from cache while the minted credential is still fresh
         if (this._cache && Date.now() < this._cache.expiresAt) {

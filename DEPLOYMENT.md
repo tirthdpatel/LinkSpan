@@ -84,7 +84,24 @@ fetches them at connection time (`client/src/core/IceServers.js`). No TURN
 secret ships in the public JS bundle, and no `VITE_TURN_*` build-time env is
 needed.
 
-**Cloudflare setup (free tier: 1 TB/month relayed, no payment method):**
+**No-card setup — ExpressTURN (recommended if you can't add billing info):**
+
+Cloudflare's Realtime TURN has the biggest free quota (1 TB/month) but requires
+billing details to activate. ExpressTURN's free tier needs only an email signup.
+
+1. Sign up at <https://www.expressturn.com> (free) → dashboard shows your relay
+   endpoint + **username** + **credential**.
+2. Set on Render (see `render.yaml`):
+   - `TURN_URLS` = e.g. `turn:relay1.expressturn.com:3480`
+   - `TURN_USERNAME` = your ExpressTURN username
+   - `TURN_CREDENTIAL` = your ExpressTURN credential
+3. Done — the server serves these at `/api/v1/turn-credentials`. They're fixed
+   (not ephemeral), but they live in server env instead of the client bundle, so
+   rotating them is an env edit, not a redeploy. Zero-signup fallback: Metered's
+   public Open Relay (`TURN_URLS=turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443`,
+   username/credential `openrelayproject`) — best-effort, no SLA.
+
+**Cloudflare setup (free tier: 1 TB/month relayed; requires billing info on file):**
 
 1. Create a free Cloudflare account → dashboard → **Realtime → TURN** → create a
    TURN key. You get a **Key ID** and an **API token**.

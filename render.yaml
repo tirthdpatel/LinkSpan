@@ -86,11 +86,18 @@ services:
         sync: false
       - key: CLOUDFLARE_TURN_API_TOKEN
         sync: false
-      # Self-hosted alternative (coturn use-auth-secret): set TURN_STATIC_SECRET and
-      # TURN_URLS (comma-separated turn:/turns: URLs) instead of the Cloudflare pair.
-      # - key: TURN_STATIC_SECRET
+      # No-card alternative (Cloudflare Realtime requires billing info to activate):
+      # fixed credentials from ExpressTURN (free tier, email signup only) or any
+      # static-cred TURN provider. Set all three; leave the Cloudflare pair unset.
+      # - key: TURN_URLS          # e.g. turn:relay1.expressturn.com:3480
       #   sync: false
-      # - key: TURN_URLS
+      # - key: TURN_USERNAME
+      #   sync: false
+      # - key: TURN_CREDENTIAL
+      #   sync: false
+      # Self-hosted alternative (coturn use-auth-secret): set TURN_STATIC_SECRET and
+      # TURN_URLS (comma-separated turn:/turns: URLs) instead.
+      # - key: TURN_STATIC_SECRET
       #   sync: false
 
       # Share-link blob storage — Supabase Storage (S3-compatible)

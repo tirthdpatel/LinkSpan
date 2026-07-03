@@ -38,6 +38,36 @@ describe('TurnCredentialProvider', () => {
         assert.equal(server.credential, hmac);
     });
 
+    it('static-creds mode serves fixed provider credentials from env', async () => {
+        const p = new TurnCredentialProvider({
+            env: {
+                TURN_URLS: 'turn:relay1.expressturn.com:3480',
+                TURN_USERNAME: 'efXXXX',
+                TURN_CREDENTIAL: 'secret123',
+            },
+        });
+        assert.equal(p.mode, 'static-creds');
+        const { iceServers, ttl } = await p.getIceServers();
+        assert.ok(ttl > 0);
+        assert.deepEqual(iceServers, [{
+            urls: ['turn:relay1.expressturn.com:3480'],
+            username: 'efXXXX',
+            credential: 'secret123',
+        }]);
+    });
+
+    it('static-secret wins over static-creds when both are configured', async () => {
+        const p = new TurnCredentialProvider({
+            env: {
+                TURN_URLS: 'turn:x',
+                TURN_STATIC_SECRET: 's',
+                TURN_USERNAME: 'u',
+                TURN_CREDENTIAL: 'c',
+            },
+        });
+        assert.equal(p.mode, 'static-secret');
+    });
+
     it('cloudflare mode fetches, normalizes, and caches ice servers', async () => {
         let calls = 0;
         const fetchImpl = async (url, opts) => {
