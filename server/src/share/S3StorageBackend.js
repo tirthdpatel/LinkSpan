@@ -25,6 +25,8 @@ export class S3StorageBackend extends ObjectStorageBackend {
  *   S3_ENDPOINT            custom endpoint for S3-compatible stores (enables path-style)
  *   S3_FORCE_PATH_STYLE    'true' to force path-style addressing
  *   S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY  (else the SDK default credential chain)
+ *   S3_UPLOAD_PART_SIZE_MB  multipart part size (default: SDK default, 5 MiB)
+ *   S3_UPLOAD_CONCURRENCY   parallel in-flight parts per upload (default: SDK default, 4)
  *
  * @param {NodeJS.ProcessEnv} [env]
  */
@@ -43,21 +45,39 @@ export async function createS3Driver(env = process.env) {
     const bucket = env.S3_BUCKET;
     if (!bucket) throw new Error('S3_BUCKET is required for SHARE_STORAGE=s3');
 
+    const custom = Boolean(env.S3_ENDPOINT);
     const client = new S3Client({
         region: env.S3_REGION || env.AWS_REGION || 'us-east-1',
         endpoint: env.S3_ENDPOINT || undefined,
-        forcePathStyle: env.S3_FORCE_PATH_STYLE === 'true' || Boolean(env.S3_ENDPOINT),
+        forcePathStyle: env.S3_FORCE_PATH_STYLE === 'true' || custom,
+        // SDK ≥3.729 attaches x-amz-checksum-* headers to every request by default;
+        // several S3-compatible stores (Backblaze B2, older MinIO/R2) reject them.
+        // On a custom endpoint, only send checksums where the API requires them.
+        ...(custom ? {
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+            responseChecksumValidation: 'WHEN_REQUIRED',
+        } : {}),
         credentials: env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY
             ? { accessKeyId: env.S3_ACCESS_KEY_ID, secretAccessKey: env.S3_SECRET_ACCESS_KEY }
             : undefined,
     });
 
+    const partSizeMb = Number(env.S3_UPLOAD_PART_SIZE_MB);
+    const partSize = Number.isFinite(partSizeMb) && partSizeMb >= 5 ? partSizeMb * 1024 * 1024 : undefined;
+    const queueSize = Number(env.S3_UPLOAD_CONCURRENCY) || undefined;
+
     return {
         bucket,
+        client, // exposed for config assertions in tests and the verify script
         async putStream(key, iterable) {
             // lib-storage's Upload streams + does multipart automatically, aborting the
             // upload if the body errors (e.g. our byte-ceiling guard throws mid-stream).
-            const up = new Upload({ client, params: { Bucket: bucket, Key: key, Body: Readable.from(iterable) } });
+            const up = new Upload({
+                client,
+                partSize,
+                queueSize,
+                params: { Bucket: bucket, Key: key, Body: Readable.from(iterable) },
+            });
             await up.done();
         },
         async getStream(key) {
