@@ -146,7 +146,13 @@ export class MultiConnection {
         const peer = new PeerConnection({
             onIceCandidate: (candidate) => this._signaling.sendIceCandidate({ ...candidate, pcIndex }),
             onChannel: () => { /* negotiated channels never fire ondatachannel */ },
-            onConnectionStateChange: () => { /* opportunistic — no state transitions */ },
+            onConnectionStateChange: (state) => {
+                // Opportunistic — never drives transfer state. Logged so striping is
+                // observable in the field (and assertable in e2e).
+                if (state === 'connected') {
+                    console.log(`[MultiConnection] Secondary connection ${pcIndex} connected`);
+                }
+            },
             // PeerConnection auto-restarts ICE on 'failed'; route the restart offer
             // back through signaling with our tag so the peer renegotiates this PC.
             onIceRestartRequired: (offer) => this._signaling.sendOffer({ ...offer, pcIndex }),
