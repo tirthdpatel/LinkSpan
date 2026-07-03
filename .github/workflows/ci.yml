@@ -147,7 +147,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy filesystem scan (HIGH/CRITICAL, blocking)
-        uses: aquasecurity/trivy-action@0.28.0
+        # SHA-pinned (v0.36.0) — tag-only pins are mutable and `0.28.0` (no `v`)
+        # didn't even resolve; a SHA can't be moved by a compromised upstream tag.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
