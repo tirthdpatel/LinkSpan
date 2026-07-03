@@ -3,6 +3,7 @@ import { SignalingClient } from '../core/SignalingClient';
 import { PeerConnection } from '../core/PeerConnection';
 import { resolveIceServers } from '../core/IceServers';
 import { ChannelManager } from '../core/ChannelManager';
+import { MultiConnection } from '../core/MultiConnection';
 import { RelayChannel } from '../core/RelayChannel';
 import { BatchSender } from '../transfer/BatchSender';
 import { BatchReceiver } from '../transfer/BatchReceiver';
@@ -14,7 +15,7 @@ import { DestinationManager, isFsAccessSupported } from '../storage/DestinationM
 import { CryptoEngine } from '../crypto/CryptoEngine';
 import { getLocalIdentity } from '../core/DeviceIdentity';
 import { reportTransfer } from '../telemetry/Telemetry';
-import { TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE } from '@shared/constants.js';
+import { TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE, EXTRA_PEER_CONNECTIONS } from '@shared/constants.js';
 
 /**
  * Perform an ECDH key exchange over a channel (DataChannel or relay) and resolve
@@ -136,6 +137,8 @@ export function useConnection({
     // ── Engine refs ─────────────────────────────────────────────
     const signalingRef = useRef(null);
     const peerRef = useRef(null);
+    // Secondary peer connections for multi-connection striping (Phase 3).
+    const multiConnRef = useRef(null);
     const channelManagerRef = useRef(null);
     const senderRef = useRef(null);
     const receiverRef = useRef(null);
@@ -174,11 +177,13 @@ export function useConnection({
         senderRef.current?.stop();
         receiverRef.current?.stop();
         channelManagerRef.current?.closeAll();
+        multiConnRef.current?.close();
         peerRef.current?.close();
         signalingRef.current?.disconnect();
         senderRef.current = null;
         receiverRef.current = null;
         channelManagerRef.current = null;
+        multiConnRef.current = null;
         peerRef.current = null;
         signalingRef.current = null;
         // Abort any pending SAS verification so its promise doesn't dangle.
@@ -425,6 +430,17 @@ export function useConnection({
                 peerRef.current = peer;
                 peer.init();
 
+                // Secondary connections for multi-connection striping. Opened only
+                // when both sides advertise support (see 'offer'/'answer' handlers);
+                // extra SDP/ICE rides the same signaling session tagged with pcIndex
+                // inside the payload, which old peers and the server pass through or
+                // ignore. Failures never affect the primary connection.
+                const multiConn = new MultiConnection({ signaling, channelManager, iceServers });
+                multiConnRef.current = multiConn;
+                // How many secondaries the remote peer accepts (receiver echoes this
+                // in its answer payload; 0 = old client / unsupported).
+                let remoteMultiConn = 0;
+
                 // ── Signaling Handlers ──────────────────────────────────
                 signaling.on('session-created', (data) => {
                     setSessionId(data.sessionId ?? '');
@@ -483,6 +499,12 @@ export function useConnection({
                 });
 
                 signaling.on('offer', async (offer) => {
+                    // Secondary-connection offers are tagged with pcIndex — route them
+                    // to MultiConnection instead of renegotiating the primary.
+                    if (MultiConnection.isSecondaryPayload(offer)) {
+                        await multiConn.handleOffer(offer);
+                        return;
+                    }
                     await peer.setRemoteDescription(offer);
                     peer.createChannels(() => {});
                     channelManager.setChannels(peer.channels);
@@ -505,14 +527,25 @@ export function useConnection({
                     }
 
                     const answer = await peer.createAnswer();
-                    signaling.sendAnswer(answer);
+                    // Advertise multi-connection support in-band; the extra field is
+                    // relayed opaquely by the server and ignored by old senders.
+                    signaling.sendAnswer({ ...answer, multiConn: EXTRA_PEER_CONNECTIONS });
                 });
 
                 signaling.on('answer', async (answer) => {
+                    if (MultiConnection.isSecondaryPayload(answer)) {
+                        await multiConn.handleAnswer(answer);
+                        return;
+                    }
+                    remoteMultiConn = MultiConnection.negotiatedCount(answer.multiConn);
                     await peer.setRemoteDescription(answer);
                 });
 
                 signaling.on('ice-candidate', async (candidate) => {
+                    if (MultiConnection.isSecondaryPayload(candidate)) {
+                        await multiConn.handleCandidate(candidate);
+                        return;
+                    }
                     await peer.addIceCandidate(candidate);
                 });
 
@@ -560,6 +593,15 @@ export function useConnection({
 
                 // Wait for channel (WebRTC or relay)
                 const cm = await channelReadyPromise;
+
+                // Primary P2P path is up — open secondary connections in the
+                // background if the receiver advertised support. The transfer starts
+                // immediately on the primary; secondaries add their channels to the
+                // pool as they connect. Never opened on the relay fallback.
+                if (role === 'sender' && cm === channelManager && remoteMultiConn > 0) {
+                    multiConn.openSecondaries(remoteMultiConn).catch(() => { /* opportunistic */ });
+                }
+
                 resolve(cm);
             } catch (err) {
                 setError({ message: err.message || 'Failed to connect.' });

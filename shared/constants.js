@@ -40,6 +40,20 @@ export function pickChunkSize(fileSize, encrypted = true) {
     return max;                                                          // large    → max
 }
 export const MAX_CHANNELS = 7;
+// Parallel RTCPeerConnections per transfer (multi-connection striping). All data
+// channels on one RTCPeerConnection share a single SCTP association — and one
+// congestion window — so on high-RTT paths a lone connection caps throughput no
+// matter how many channels it carries. Extra connections each get their own
+// congestion window, multiplying steady-state throughput roughly by their count.
+// The capability is negotiated in-band (answer payload `multiConn`) and the extra
+// connections are multiplexed over the same signaling session via a `pcIndex`
+// field inside SDP/ICE payloads, so old peers and old servers are unaffected.
+export const EXTRA_PEER_CONNECTIONS = 3; // secondaries; total = 1 + this
+// Data channels per SECONDARY connection. Channels on one association share its
+// congestion window, so extra channels add head-of-line relief, not bandwidth;
+// a couple per secondary keeps meta+binary pairs flowing without the setup cost
+// of another 7.
+export const SECONDARY_PC_CHANNELS = 2;
 // Receiver pull-window: how many chunks may be requested but not yet received at
 // once. This is the bandwidth-delay-product lever — throughput is roughly
 // (MAX_IN_FLIGHT × chunkSize) / RTT, so a window of 7 × 256 KB = 1.75 MB caps a
@@ -47,6 +61,12 @@ export const MAX_CHANNELS = 7;
 // keeps the pipe full on those paths while staying a bounded amount of receiver
 // memory. Direct-LAN transfers were never window-limited, so this doesn't hurt them.
 export const MAX_IN_FLIGHT = 24;
+// Ceiling for the ADAPTIVE receiver window (see Receiver._updateWindow). The window
+// starts at MAX_IN_FLIGHT and grows toward measured-BDP on long fat pipes; the cap
+// bounds receiver memory for requested-but-unarrived chunks (128 × 256 KB = 32 MB)
+// and the bufferbloat feedback loop (queuing delay inflates measured RTT, which
+// would otherwise grow the window without bound).
+export const MAX_IN_FLIGHT_CAP = 128;
 // How many chunks the sender prepares (read → hash → encrypt) and sends
 // concurrently when serving a range request. The previous strictly-serial loop
 // left the CPU idle during each chunk's async crypto and the channels idle during

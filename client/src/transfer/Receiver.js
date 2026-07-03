@@ -1,6 +1,7 @@
 import {
     TRANSFER_MSG,
     MAX_IN_FLIGHT,
+    MAX_IN_FLIGHT_CAP,
     MAX_RETRY_COUNT,
     STALL_TIMEOUT_MS,
 } from '@shared/constants.js';
@@ -66,6 +67,15 @@ export class Receiver {
 
         /** @type {Set<number>} chunks in-flight (requested but not yet received) */
         this.inFlight = new Set();
+        /** @type {Map<number, number>} chunk index → request timestamp (for RTT) */
+        this._requestedAt = new Map();
+        // Adaptive pull window (bandwidth-delay product). Starts at the fixed
+        // MAX_IN_FLIGHT floor and grows toward measured BDP on long fat pipes —
+        // a fixed 24×256 KB window caps a 200 ms path at ~30 MB/s of *theoretical*
+        // ceiling but strangles multi-connection striping and higher-RTT relays.
+        this._window = MAX_IN_FLIGHT;
+        /** @type {number|null} EWMA of request→arrival latency in ms */
+        this._rttEwma = null;
         /** @type {Map<number, number>} chunk index → retry count */
         this.retryCount = new Map();
         /** @type {Map<number, { hash: string, size: number }>} pending hash metadata */
@@ -213,6 +223,17 @@ export class Receiver {
         this._pendingMeta.delete(index);
         this.inFlight.delete(index);
 
+        // RTT sample: request → arrival (includes sender queuing, which is the
+        // effective pipe latency the window has to cover).
+        const requestedAt = this._requestedAt.get(index);
+        this._requestedAt.delete(index);
+        if (requestedAt) {
+            const sample = Date.now() - requestedAt;
+            this._rttEwma = this._rttEwma === null
+                ? sample
+                : 0.8 * this._rttEwma + 0.2 * sample;
+        }
+
         // Reset stall timer on any chunk received
         this._lastChunkTime = Date.now();
         this._resetStallTimer();
@@ -279,6 +300,7 @@ export class Receiver {
         const received = this.resumeManager.getProgress(this.fileMeta.fileId) / 100 * this.totalChunks;
         const elapsed = (Date.now() - this._startTime) / 1000;
         const speed = elapsed > 0 ? this._bytesReceived / elapsed : 0;
+        this._updateWindow(speed);
         this.onProgress(Math.round(received), this.totalChunks, speed, index);
 
         // All chunks present — verify before declaring success. We do NOT finalize on
@@ -306,16 +328,33 @@ export class Receiver {
         }
     }
 
+    /**
+     * Adapt the pull window to the measured bandwidth-delay product. Keeping
+     * ~1.5×BDP of chunks requested-but-unarrived is what keeps the pipe full as
+     * RTT and capacity vary (multi-connection striping raises capacity; TURN or
+     * cross-continent paths raise RTT). Clamped to [MAX_IN_FLIGHT, MAX_IN_FLIGHT_CAP]
+     * so a noisy sample can never stall (floor) or blow up memory (cap).
+     * @param {number} bytesPerSec current observed throughput
+     */
+    _updateWindow(bytesPerSec) {
+        if (!this._rttEwma || !bytesPerSec) return;
+        const bdpChunks = (bytesPerSec * (this._rttEwma / 1000)) / this.fileMeta.chunkSize;
+        this._window = Math.min(
+            MAX_IN_FLIGHT_CAP,
+            Math.max(MAX_IN_FLIGHT, Math.ceil(bdpChunks * 1.5))
+        );
+    }
+
     _requestNextChunks() {
         if (!this._active || this._paused || this._finalized) return;
 
         const missing = this.getMissingChunks();
-        const slotsAvailable = MAX_IN_FLIGHT - this.inFlight.size;
+        const slotsAvailable = this._window - this.inFlight.size;
         if (slotsAvailable <= 0) return;
 
-        // Select the window of not-yet-in-flight chunks to request now. MAX_IN_FLIGHT
-        // remains the cap on the EXPANDED chunk count regardless of how the request is
-        // framed (sparse post-reload gaps just produce more, shorter ranges).
+        // Select the window of not-yet-in-flight chunks to request now. The adaptive
+        // window remains the cap on the EXPANDED chunk count regardless of how the
+        // request is framed (sparse post-reload gaps just produce more, shorter ranges).
         const toRequest = [];
         for (let i = 0; i < missing.length && toRequest.length < slotsAvailable; i++) {
             if (!this.inFlight.has(missing[i])) toRequest.push(missing[i]);
@@ -331,6 +370,7 @@ export class Receiver {
 
     _requestChunk(index) {
         this.inFlight.add(index);
+        this._requestedAt.set(index, Date.now());
         const msg = JSON.stringify({
             type: TRANSFER_MSG.CHUNK_REQUEST,
             index,
@@ -339,6 +379,7 @@ export class Receiver {
         this.channelManager.sendAny(msg).catch((err) => {
             console.error(`[Receiver] Failed to request chunk ${index}:`, err);
             this.inFlight.delete(index);
+            this._requestedAt.delete(index);
         });
     }
 
@@ -349,7 +390,11 @@ export class Receiver {
      */
     _requestChunkRange(indices) {
         const ranges = chunksToRanges(indices);
-        for (const index of indices) this.inFlight.add(index);
+        const now = Date.now();
+        for (const index of indices) {
+            this.inFlight.add(index);
+            this._requestedAt.set(index, now);
+        }
 
         const msg = JSON.stringify({
             type: TRANSFER_MSG.CHUNK_REQUEST_RANGE,
@@ -358,7 +403,10 @@ export class Receiver {
 
         this.channelManager.sendAny(msg).catch((err) => {
             console.error('[Receiver] Failed to request chunk range:', err);
-            for (const index of indices) this.inFlight.delete(index);
+            for (const index of indices) {
+                this.inFlight.delete(index);
+                this._requestedAt.delete(index);
+            }
         });
     }
 

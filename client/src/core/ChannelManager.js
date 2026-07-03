@@ -21,15 +21,30 @@ export class ChannelManager {
     }
 
     /**
-     * Register all channels.
+     * Register all channels (replaces any existing set).
      * @param {RTCDataChannel[]} channels
      */
     setChannels(channels) {
-        this.channels = channels;
-        this.ready = channels.map(() => false);
-        this.stats = channels.map(() => ({ bytes: 0, timestamp: Date.now() }));
+        this.channels = [];
+        this.ready = [];
+        this.stats = [];
+        this.addChannels(channels);
+    }
 
-        channels.forEach((ch, i) => {
+    /**
+     * Append channels to the pool and wire them into the shared message handler.
+     * Used to add a secondary peer connection's channels mid-transfer — senders and
+     * receivers address channels by index, so existing indices never change; new
+     * channels simply extend the pool that sendAny()/_pickChannel() draw from.
+     * @param {RTCDataChannel[]} channels
+     */
+    addChannels(channels) {
+        for (const ch of channels) {
+            const i = this.channels.length;
+            this.channels.push(ch);
+            this.ready.push(ch.readyState === 'open');
+            this.stats.push({ bytes: 0, timestamp: Date.now() });
+
             ch.onopen = () => {
                 this.ready[i] = true;
             };
@@ -52,7 +67,7 @@ export class ChannelManager {
             ch.onbufferedamountlow = () => {
                 this._flushDrainQueue(i);
             };
-        });
+        }
     }
 
     /**

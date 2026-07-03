@@ -82,11 +82,13 @@ export class PeerConnection {
     // ── Channels ───────────────────────────────────────────────
 
     /**
-     * Create MAX_CHANNELS data channels (sender-side).
+     * Create negotiated data channels (both sides call this with the same count).
      * @param {Function} onChannelReady - called with (channel, index) when each channel opens
+     * @param {number} [count] - channels to create (default MAX_CHANNELS; secondary
+     *        peer connections use fewer — see SECONDARY_PC_CHANNELS)
      */
-    createChannels(onChannelReady) {
-        for (let i = 0; i < MAX_CHANNELS; i++) {
+    createChannels(onChannelReady, count = MAX_CHANNELS) {
+        for (let i = 0; i < count; i++) {
             const channel = this.pc.createDataChannel(`transfer-${i}`, {
                 ...CHANNEL_CONFIG,
                 id: i,
