@@ -1,0 +1,22 @@
+# Standalone coturn deploy — for a small VM placed near the transfer route
+# (see DEPLOYMENT.md §3 "Self-hosted coturn on a VM"). Copy this directory to
+# the VM and run:
+#
+#   TURN_SECRET=$(openssl rand -hex 32) docker compose -f docker-compose.standalone.yml up -d
+#
+# (Save the secret — the signaling server needs the same value in TURN_STATIC_SECRET.)
+# host network mode: the media relay negotiates any UDP port in min_port..max_port;
+# publishing the whole range through docker-proxy wastes memory and adds latency,
+# so bind the host stack directly and firewall at the cloud/security-group level.
+services:
+  coturn:
+    image: coturn/coturn:4.6.2-alpine
+    network_mode: host
+    entrypoint: ["/bin/sh", "/usr/local/bin/coturn-entrypoint.sh"]
+    environment:
+      - TURN_SECRET=${TURN_SECRET:?TURN_SECRET is required}
+      - EXTERNAL_IP=${EXTERNAL_IP:-}
+    volumes:
+      - ./turnserver.conf:/etc/turnserver.conf:ro
+      - ./docker-entrypoint.sh:/usr/local/bin/coturn-entrypoint.sh:ro
+    restart: unless-stopped

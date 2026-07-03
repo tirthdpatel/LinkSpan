@@ -150,6 +150,37 @@ billing details to activate. ExpressTURN's free tier needs only an email signup.
 (e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349`). Credentials are
 computed locally per the TURN REST-API convention — no external API involved.
 
+**Self-hosted coturn on a VM near the route (best throughput for far-apart peers):**
+
+Free relays are usually US-hosted and throttled; if your transfers are, say,
+Europe ↔ India, a relay in Frankfurt roughly halves the relayed RTT and removes
+provider throttling. Any tiny VM works (1 vCPU / 1 GB): Hetzner CX22 (~€4/mo,
+Falkenstein/Helsinki), or a free-tier B1s via Azure for Students / GitHub
+Student Developer Pack. Pick the region between (or nearest the slower of) the
+two peers.
+
+1. Create the VM (Ubuntu 22.04+), install Docker (`curl -fsSL https://get.docker.com | sh`).
+2. Open in the cloud firewall / security group:
+   **3478/tcp+udp** (TURN), **5349/tcp+udp** (TURN over TLS/DTLS), and
+   **49152–65535/udp** (media relay range).
+3. Copy the repo's `coturn/` directory to the VM and start it:
+   ```bash
+   export TURN_SECRET=$(openssl rand -hex 32)   # save this value
+   docker compose -f docker-compose.standalone.yml up -d
+   ```
+   The entrypoint auto-detects the public IP (or set `EXTERNAL_IP=` explicitly —
+   required on clouds with 1:1 NAT where the VM only sees a private address).
+4. Point the signaling server at it (Render env):
+   - `TURN_STATIC_SECRET` = the same `TURN_SECRET` value
+   - `TURN_URLS` = `turn:YOUR_VM_IP:3478?transport=udp,turn:YOUR_VM_IP:3478?transport=tcp`
+   (Add `turns:` URLs only after configuring TLS certs in `turnserver.conf` —
+   they need a domain, not a bare IP.)
+5. Verify: `curl https://your-signaling.onrender.com/api/v1/turn-credentials`
+   should list your VM's URLs with fresh HMAC credentials, and a transfer forced
+   through TURN (both peers behind strict NAT, or Chrome with
+   `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`) should show
+   "via TURN" in the connection indicator.
+
 **Legacy static fallback:** if the endpoint is unreachable or returns empty, the
 client falls back to `VITE_TURN_DOMAIN`/`VITE_TURN_USERNAME`/`VITE_TURN_CREDENTIAL`
 build-time env (e.g. Metered's public Open Relay Project:
