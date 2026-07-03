@@ -34,6 +34,11 @@ free hosting viable even for large files.
 
 Create a free project at <https://supabase.com> (sign in with GitHub, no card).
 
+> 💡 **Prefer Backblaze B2 for the blob bucket** if you expect large share links:
+> B2's free tier is **10 GB** (vs Supabase's 1 GB total), no card, and it speaks
+> the same S3 API — so a single share link can actually use the full 5 GB cap.
+> See §1c; you still want Supabase if you enable Postgres accounts (§1b).
+
 ### 1a. Storage bucket (required — this is the production blocker, see §8)
 
 1. Project → **Storage** → **New bucket** → name it `linkspan-blobs`. Keep it
@@ -58,6 +63,33 @@ Create a free project at <https://supabase.com> (sign in with GitHub, no card).
 The app runs fully **without** Postgres (anonymous use works; accounts just live
 in memory and reset on restart). Skip this unless you want logins to persist.
 See §7 for the extra steps (it requires adding Prisma).
+
+### 1c. Alternative blob bucket: Backblaze B2 (10 GB free, no card)
+
+Same S3 backend, different provider — only env values change:
+
+1. Create an account at <https://www.backblaze.com/sign-up/cloud-storage>
+   (no card). **Buckets → Create a Bucket** → name it (e.g. `linkspan-blobs`),
+   keep **Private**.
+2. On the bucket page note the **Endpoint**, e.g.
+   `s3.us-west-004.backblazeb2.com`. The **region is embedded in it** — the part
+   after `s3.` (here `us-west-004`). Like Supabase, SigV4 signing means a region
+   mismatch 403s every call.
+3. **App Keys → Add a New Application Key**, scope it to that bucket with
+   Read/Write. Copy the **keyID** and **applicationKey** (shown once).
+4. Set on Render:
+   - `SHARE_STORAGE=s3`, `S3_BUCKET=linkspan-blobs`
+   - `S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com` (yours)
+   - `S3_REGION=us-west-004` (from the endpoint)
+   - `S3_ACCESS_KEY_ID` = keyID, `S3_SECRET_ACCESS_KEY` = applicationKey
+5. Verify before deploying — from `server/` with those vars exported:
+   `node scripts/verify-s3-backend.mjs --mb 64`
+   (uploads/downloads/range-reads/deletes a random blob and checks hashes).
+
+The server auto-enables path-style addressing and relaxes the AWS SDK's
+default checksum headers (which B2 rejects) whenever `S3_ENDPOINT` is set.
+Optional throughput tuning: `S3_UPLOAD_PART_SIZE_MB` (min 5) and
+`S3_UPLOAD_CONCURRENCY` (parallel in-flight parts, SDK default 4).
 
 ---
 
@@ -117,6 +149,37 @@ billing details to activate. ExpressTURN's free tier needs only an email signup.
 `static-auth-secret`) and `TURN_URLS`
 (e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349`). Credentials are
 computed locally per the TURN REST-API convention — no external API involved.
+
+**Self-hosted coturn on a VM near the route (best throughput for far-apart peers):**
+
+Free relays are usually US-hosted and throttled; if your transfers are, say,
+Europe ↔ India, a relay in Frankfurt roughly halves the relayed RTT and removes
+provider throttling. Any tiny VM works (1 vCPU / 1 GB): Hetzner CX22 (~€4/mo,
+Falkenstein/Helsinki), or a free-tier B1s via Azure for Students / GitHub
+Student Developer Pack. Pick the region between (or nearest the slower of) the
+two peers.
+
+1. Create the VM (Ubuntu 22.04+), install Docker (`curl -fsSL https://get.docker.com | sh`).
+2. Open in the cloud firewall / security group:
+   **3478/tcp+udp** (TURN), **5349/tcp+udp** (TURN over TLS/DTLS), and
+   **49152–65535/udp** (media relay range).
+3. Copy the repo's `coturn/` directory to the VM and start it:
+   ```bash
+   export TURN_SECRET=$(openssl rand -hex 32)   # save this value
+   docker compose -f docker-compose.standalone.yml up -d
+   ```
+   The entrypoint auto-detects the public IP (or set `EXTERNAL_IP=` explicitly —
+   required on clouds with 1:1 NAT where the VM only sees a private address).
+4. Point the signaling server at it (Render env):
+   - `TURN_STATIC_SECRET` = the same `TURN_SECRET` value
+   - `TURN_URLS` = `turn:YOUR_VM_IP:3478?transport=udp,turn:YOUR_VM_IP:3478?transport=tcp`
+   (Add `turns:` URLs only after configuring TLS certs in `turnserver.conf` —
+   they need a domain, not a bare IP.)
+5. Verify: `curl https://your-signaling.onrender.com/api/v1/turn-credentials`
+   should list your VM's URLs with fresh HMAC credentials, and a transfer forced
+   through TURN (both peers behind strict NAT, or Chrome with
+   `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`) should show
+   "via TURN" in the connection indicator.
 
 **Legacy static fallback:** if the endpoint is unreachable or returns empty, the
 client falls back to `VITE_TURN_DOMAIN`/`VITE_TURN_USERNAME`/`VITE_TURN_CREDENTIAL`
@@ -208,8 +271,9 @@ What to expect on free tier:
 - **Large files**: fine over **direct P2P / TURN** (they never hit the server).
   The **server relay fallback is capped at 100 MB per session**
   (`MAX_RELAY_SESSION_BYTES`) — that path is only used when both P2P and TURN
-  fail. Share-link uploads are capped at 5 GB per link by code, but Supabase
-  free storage is **1 GB total**, so that's your real ceiling.
+  fail. Share-link uploads are capped at 5 GB per link by code; your real
+  ceiling is the bucket's free tier — **1 GB total** on Supabase, **10 GB** on
+  Backblaze B2 (§1c), so B2 is the one that fits a full-size link.
 
 ---
 
