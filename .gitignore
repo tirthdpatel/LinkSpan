@@ -44,3 +44,7 @@ playwright-report/
 # Cache
 .cache/
 .eslintcache
+
+# Personal study material (not part of the project)
+LinkSpan-Study-Guide/
+docs/LINKSPAN-KNOWLEDGE-BASE.md
