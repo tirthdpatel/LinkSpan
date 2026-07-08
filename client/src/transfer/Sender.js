@@ -44,6 +44,8 @@ export class Sender {
         this.verifier = new IntegrityVerifier();
 
         this._sentChunks = 0;
+        /** @type {Set<number>} indices already delivered, so NACK retransmits don't double-count */
+        this._sentIndices = new Set();
         this._lastReportedChunks = -1;
         this._startTime = null;
         this._bytesSent = 0;
@@ -289,8 +291,14 @@ export class Sender {
             // Reset retry count on success
             this._retryCount.delete(index);
 
-            this._sentChunks++;
+            // Count unique chunks only — a NACK retransmit re-sends an index we
+            // already delivered, so without this guard _sentChunks would exceed
+            // totalChunks (progress > 100%, negative ETA) on any lossy link.
             this._bytesSent += data.byteLength;
+            if (!this._sentIndices.has(index)) {
+                this._sentIndices.add(index);
+                this._sentChunks = this._sentIndices.size;
+            }
 
             // Delta-based progress reporting (only emit on change)
             if (this._sentChunks !== this._lastReportedChunks) {

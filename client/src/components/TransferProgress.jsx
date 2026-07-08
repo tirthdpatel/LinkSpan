@@ -1,7 +1,7 @@
 import React from 'react';
 
 export function TransferProgress({ sentChunks, totalChunks, speed, role, fileName, fileSize, complete }) {
-    const progress = totalChunks > 0 ? (sentChunks / totalChunks) * 100 : 0;
+    const progress = totalChunks > 0 ? Math.min((sentChunks / totalChunks) * 100, 100) : 0;
 
     const formatSize = (bytes) => {
         if (bytes === 0) return '0 B';
@@ -17,7 +17,7 @@ export function TransferProgress({ sentChunks, totalChunks, speed, role, fileNam
 
     const estimateETA = () => {
         if (speed <= 0 || complete) return '--';
-        const remaining = ((totalChunks - sentChunks) * 256 * 1024); // approximate
+        const remaining = Math.max(totalChunks - sentChunks, 0) * 256 * 1024; // approximate
         const seconds = remaining / speed;
         if (seconds < 60) return `${Math.ceil(seconds)}s`;
         if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`;
