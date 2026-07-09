@@ -1,6 +1,6 @@
 import React from 'react';
 
-export function TransferProgress({ sentChunks, totalChunks, speed, role, fileName, fileSize, complete }) {
+export function TransferProgress({ sentChunks, totalChunks, speed, role, fileName, fileSize, complete, onCancel }) {
     const progress = totalChunks > 0 ? Math.min((sentChunks / totalChunks) * 100, 100) : 0;
 
     const formatSize = (bytes) => {
@@ -98,6 +98,24 @@ export function TransferProgress({ sentChunks, totalChunks, speed, role, fileNam
                     <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Progress</div>
                 </div>
             </div>
+
+            {/* Cancel — stops the transfer but the receiver keeps the chunks it already has,
+                so retrying the same file resumes from where it stopped (content-derived fileId). */}
+            {!complete && onCancel && (
+                <div className="flex flex-col items-center gap-1 pt-1">
+                    <button
+                        data-testid="transfer-cancel"
+                        onClick={onCancel}
+                        className="px-4 py-2 rounded-lg text-sm font-medium transition-opacity hover:opacity-80"
+                        style={{ background: 'var(--bg-secondary)', color: '#ef4444', border: '1px solid var(--border-color)' }}
+                    >
+                        Cancel transfer
+                    </button>
+                    <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                        Progress is kept — retry the same file to resume
+                    </span>
+                </div>
+            )}
         </div>
     );
 }

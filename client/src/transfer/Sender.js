@@ -2,6 +2,7 @@ import { ChunkManager } from './ChunkManager.js';
 import { IntegrityVerifier } from './IntegrityVerifier.js';
 import { FileManifest } from './FileManifest.js';
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
+import { maybeCompress } from './Compression.js';
 import {
     TRANSFER_MSG,
     MAX_RETRY_COUNT,
@@ -44,6 +45,10 @@ export class Sender {
         this.verifier = new IntegrityVerifier();
 
         this._sentChunks = 0;
+        // On a resumed transfer the receiver already holds some chunks and reports
+        // that count via RESUME_PROGRESS. We add it as a baseline so reported
+        // progress reflects the whole transfer, not just chunks served this session.
+        this._resumeBaseline = 0;
         /** @type {Set<number>} indices already delivered, so NACK retransmits don't double-count */
         this._sentIndices = new Set();
         this._lastReportedChunks = -1;
@@ -141,6 +146,15 @@ export class Sender {
 
                     case TRANSFER_MSG.PAUSE:
                         this._paused = true;
+                        break;
+
+                    case TRANSFER_MSG.RESUME_PROGRESS:
+                        // Receiver already holds `received` chunks from a prior session;
+                        // baseline our reported progress so the UI doesn't restart at 0%.
+                        this._resumeBaseline = Math.min(
+                            Number(msg.received) || 0,
+                            this.chunkManager.totalChunks,
+                        );
                         break;
 
                     case TRANSFER_MSG.RESUME: {
@@ -282,10 +296,16 @@ export class Sender {
             // bytes — this keeps per-chunk and whole-file hash semantics intact.
             const hash = await this.verifier.recordChunk(index, data);
 
+            // Compress the plaintext before encryption (only if it actually shrinks;
+            // maybeCompress returns the original bytes with compressed=false otherwise).
+            // Compressing inside the ciphertext keeps the hash/verification semantics
+            // over the original plaintext.
+            const { data: payloadPlain, compressed } = await maybeCompress(data);
+
             // Encrypt before it leaves this peer (no-op if no session key).
             const payload = this.cryptoKey
-                ? await CryptoEngine.encryptChunk(this.cryptoKey, data)
-                : data;
+                ? await CryptoEngine.encryptChunk(this.cryptoKey, payloadPlain)
+                : payloadPlain;
 
             // Find the best channel for this chunk
             const channelIndex = this._pickBestChannel();
@@ -295,12 +315,14 @@ export class Sender {
                 return;
             }
 
-            // Send hash metadata (JSON control message). size = plaintext size.
+            // Send hash metadata (JSON control message). size = plaintext size;
+            // `compressed` tells the receiver whether to inflate before verifying.
             const hashMsg = JSON.stringify({
                 type: TRANSFER_MSG.CHUNK_DATA,
                 index,
                 hash,
                 size: data.byteLength,
+                compressed,
             });
             await this.channelManager.send(channelIndex, hashMsg);
 
@@ -328,7 +350,13 @@ export class Sender {
                 this._lastReportedChunks = this._sentChunks;
                 const elapsed = (Date.now() - this._startTime) / 1000;
                 const speed = elapsed > 0 ? this._bytesSent / elapsed : 0;
-                this.onProgress(this._sentChunks, this.chunkManager.totalChunks, speed);
+                // Report progress against the whole transfer: chunks the receiver
+                // already had (resume baseline) plus chunks served this session.
+                const reported = Math.min(
+                    this._resumeBaseline + this._sentChunks,
+                    this.chunkManager.totalChunks,
+                );
+                this.onProgress(reported, this.chunkManager.totalChunks, speed);
             }
         } catch (err) {
             console.error(`[Sender] Failed to send chunk ${index}:`, err.message);
