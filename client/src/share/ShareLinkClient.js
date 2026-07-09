@@ -1,4 +1,5 @@
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
+import { readBlobToArrayBuffer } from '../transfer/blobReader.js';
 
 /**
  * ShareLinkClient — browser client for the LinkSpan share-link REST API.
@@ -66,7 +67,9 @@ export class ShareLinkClient {
             key = await CryptoEngine.exportKey(cryptoKey);
             metadata = { encrypted: 'aes-256-gcm' };
         } else {
-            body = await blob.arrayBuffer();
+            // Sliced read (not blob.arrayBuffer()) so large mobile files don't throw
+            // NotReadableError. See transfer/blobReader.js.
+            body = await readBlobToArrayBuffer(blob);
         }
         const size = body.byteLength;
 

@@ -19,6 +19,8 @@
  *   2. Password: both sides derive the same key via PBKDF2
  *   3. Session secret: server generates and distributes (weaker — server sees key)
  */
+import { readBlobToArrayBuffer } from '../transfer/blobReader.js';
+
 export class CryptoEngine {
 
     // ── Key Management ─────────────────────────────────────────
@@ -235,7 +237,9 @@ export class CryptoEngine {
      * @returns {Promise<ArrayBuffer>}
      */
     static async encryptBlob(key, blob) {
-        const buffer = await blob.arrayBuffer();
+        // Sliced read, not blob.arrayBuffer(): a whole-file read of a large file throws
+        // NotReadableError on mobile. See transfer/blobReader.js.
+        const buffer = await readBlobToArrayBuffer(blob);
         return CryptoEngine.encryptChunk(key, buffer);
     }
 
