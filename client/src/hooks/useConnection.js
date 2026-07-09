@@ -385,6 +385,11 @@ export function useConnection({
                 const peer = new PeerConnection({
                     onIceCandidate: (candidate) => signaling.sendIceCandidate(candidate),
 
+                    // A degraded/disconnected connection (e.g. a Wi-Fi ↔ cellular switch)
+                    // asks for an ICE restart; relay the restart offer to the peer so the
+                    // connection recovers in place and the transfer continues.
+                    onIceRestartRequired: (restartOffer) => signaling.sendIceRestartOffer(restartOffer),
+
                     onChannel: (ch) => {
                         const resolve = channelReadyResolve;
                         if (!resolve) return;
@@ -498,7 +503,7 @@ export function useConnection({
                     }
                 });
 
-                signaling.on('offer', async (offer) => {
+                signaling.on('offer', async (offer, isRestart = false) => {
                     // Secondary-connection offers are tagged with pcIndex — route them
                     // to MultiConnection instead of renegotiating the primary.
                     if (MultiConnection.isSecondaryPayload(offer)) {
@@ -506,23 +511,29 @@ export function useConnection({
                         return;
                     }
                     await peer.setRemoteDescription(offer);
-                    peer.createChannels(() => {});
-                    channelManager.setChannels(peer.channels);
 
-                    // Wire channel open events for receiver side
-                    for (const ch of peer.channels) {
-                        if (ch.readyState === 'open') {
-                            if (channelReadyResolve) {
-                                channelReadyResolve = null;
-                                resolve(channelManager);
-                            }
-                        } else {
-                            ch.addEventListener('open', () => {
+                    // An ICE-restart offer reuses the existing SCTP association and the
+                    // already-negotiated channels — re-creating them would collide on the
+                    // fixed channel ids. Just answer to refresh the ICE transport.
+                    if (!isRestart) {
+                        peer.createChannels(() => {});
+                        channelManager.setChannels(peer.channels);
+
+                        // Wire channel open events for receiver side
+                        for (const ch of peer.channels) {
+                            if (ch.readyState === 'open') {
                                 if (channelReadyResolve) {
                                     channelReadyResolve = null;
                                     resolve(channelManager);
                                 }
-                            }, { once: true });
+                            } else {
+                                ch.addEventListener('open', () => {
+                                    if (channelReadyResolve) {
+                                        channelReadyResolve = null;
+                                        resolve(channelManager);
+                                    }
+                                }, { once: true });
+                            }
                         }
                     }
 

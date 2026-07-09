@@ -69,3 +69,27 @@ describe('ChunkManager metadata', () => {
         await expect(cm.getChunk(99)).rejects.toThrow(/out of range/);
     });
 });
+
+describe('ChunkManager fileId — stable across sends so resume can match', () => {
+    // fileId keys the receiver's persisted progress; the same file must produce the same
+    // id on a re-send, or a re-pair after a disconnect would start from zero.
+    const fileLike = (name, size, lastModified) => ({ name, size, lastModified });
+
+    test('is deterministic for the same file identity', () => {
+        const a = new ChunkManager(fileLike('video.mp4', 12345, 1000));
+        const b = new ChunkManager(fileLike('video.mp4', 12345, 1000));
+        expect(a.fileId).toBe(b.fileId);
+    });
+
+    test('is 32 lowercase hex chars (unchanged wire format)', () => {
+        const cm = new ChunkManager(fileLike('video.mp4', 12345, 1000));
+        expect(cm.fileId).toMatch(/^[0-9a-f]{32}$/);
+    });
+
+    test('differs when name, size, or mtime differ', () => {
+        const base = new ChunkManager(fileLike('a.mp4', 100, 1)).fileId;
+        expect(new ChunkManager(fileLike('b.mp4', 100, 1)).fileId).not.toBe(base);
+        expect(new ChunkManager(fileLike('a.mp4', 101, 1)).fileId).not.toBe(base);
+        expect(new ChunkManager(fileLike('a.mp4', 100, 2)).fileId).not.toBe(base);
+    });
+});
