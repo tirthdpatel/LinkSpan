@@ -78,6 +78,11 @@ export class BatchReceiver {
         this.cm.onMessage((raw) => this._route(raw));
     }
 
+    /** Loss stats of the file currently being received (for diagnostics). */
+    getLossStats() {
+        return this._activeReceiver?.getLossStats?.() ?? null;
+    }
+
     stop() {
         this._active = false;
         this._activeReceiver?.stop();

@@ -90,9 +90,29 @@ export class Receiver {
         this._stallTimer = null;
         this._awaitingManifest = false;
         this._manifestTimer = null;
+
+        // Loss accounting for the diagnostics readout. Every chunk we ask for counts
+        // as a request; chunks the stall timer has to ask for again are our observable
+        // loss signal (the sender's copy never arrived within STALL_TIMEOUT_MS).
+        this._chunkRequests = 0;
+        this._retransmits = 0;
     }
 
     // ── Public API ─────────────────────────────────────────────
+
+    /**
+     * Loss stats for diagnostics: fraction of chunk requests we had to re-issue
+     * because the sender's copy never arrived within the stall timeout.
+     * @returns {{ requests: number, retransmits: number, lossRate: number }}
+     */
+    getLossStats() {
+        const requests = this._chunkRequests;
+        return {
+            requests,
+            retransmits: this._retransmits,
+            lossRate: requests > 0 ? this._retransmits / requests : 0,
+        };
+    }
 
     /**
      * Start the receiver — initialize storage and begin requesting chunks.
@@ -371,6 +391,7 @@ export class Receiver {
     _requestChunk(index) {
         this.inFlight.add(index);
         this._requestedAt.set(index, Date.now());
+        this._chunkRequests++;
         const msg = JSON.stringify({
             type: TRANSFER_MSG.CHUNK_REQUEST,
             index,
@@ -395,6 +416,7 @@ export class Receiver {
             this.inFlight.add(index);
             this._requestedAt.set(index, now);
         }
+        this._chunkRequests += indices.length;
 
         const msg = JSON.stringify({
             type: TRANSFER_MSG.CHUNK_REQUEST_RANGE,
@@ -519,6 +541,7 @@ export class Receiver {
 
             // Re-request all in-flight chunks
             const stalledChunks = Array.from(this.inFlight);
+            this._retransmits += stalledChunks.length;
             this.inFlight.clear();
             for (const idx of stalledChunks) {
                 this._requestChunk(idx);

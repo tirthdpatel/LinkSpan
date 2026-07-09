@@ -915,7 +915,16 @@ export function useConnection({
         if (!cm || !pc) return null;
         const channelStats = cm.getChannelStats();
         const pcStats = await pc.getStats?.().catch(() => null);
-        return { channelStats, rtt: pcStats?.rtt, transport: pcStats?.transport ?? null };
+        // Loss comes from whichever role is active this session (send xor receive).
+        const loss = senderRef.current?.getLossStats?.()
+            ?? receiverRef.current?.getLossStats?.()
+            ?? null;
+        return {
+            channelStats,
+            rtt: pcStats?.rtt,
+            transport: pcStats?.transport ?? null,
+            lossRate: loss?.lossRate ?? 0,
+        };
     }, []);
 
     return {

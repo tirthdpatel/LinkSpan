@@ -49,4 +49,15 @@ export default [
             },
         },
     },
+    {
+        // Standalone benchmarks are run manually with `node` — Node + browser globals
+        // (they use both the Web Crypto `crypto` and Node timers/console/performance).
+        files: ['benchmarks/**/*.{js,mjs}'],
+        languageOptions: {
+            globals: {
+                ...globals.node,
+                ...globals.browser,
+            },
+        },
+    },
 ];

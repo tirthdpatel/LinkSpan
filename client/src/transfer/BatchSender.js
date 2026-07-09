@@ -143,6 +143,11 @@ export class BatchSender {
         }
     }
 
+    /** Loss stats of the file currently being sent (for diagnostics). */
+    getLossStats() {
+        return this._activeSender?.getLossStats?.() ?? null;
+    }
+
     stop() {
         this._active = false;
         this._clearApprovalTimer();

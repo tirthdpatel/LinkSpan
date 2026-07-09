@@ -18,6 +18,7 @@ import { ErrorNotification } from './components/ErrorNotification';
 import { SolarSystem } from './components/SolarSystem';
 import { InteractiveCard, GlowIcon } from './components/InteractiveElements';
 import { useConnection } from './hooks/useConnection';
+import { EventLoopLoadMonitor, classifyBottleneck } from './transfer/BottleneckMonitor.js';
 import { extractText } from './transfer/TextPayload';
 import { parseLinkPayload, extractLinkText } from './transfer/LinkPayload';
 import { TRANSFER_STATE, TRANSFER_TYPE } from '@shared/constants.js';
@@ -51,6 +52,10 @@ const INITIAL_DIAGNOSTICS = {
     relayMode: false,
     transport: null, // 'direct' | 'turn' | null — how the P2P connection is routed
     encrypted: false, // true once the ECDH session key is agreed (app-layer E2E)
+    throughput: 0, // aggregate bytes/sec across all channels, sampled each second
+    cpuLoad: 0, // main-thread busy fraction [0,1] — high ⇒ encryption/hashing bound
+    lossRate: 0, // retransmit fraction [0,1] — high ⇒ lossy/high-latency path
+    bottleneck: { verdict: 'idle', reason: '' }, // which lever would actually help
 };
 
 export default function App() {
@@ -173,21 +178,39 @@ export default function App() {
         }
     }, [completedBlob, completedFileName]);
 
-    // Diagnostics polling — only active during transfers
+    // Diagnostics polling — only active during transfers. Also samples main-thread
+    // load so the readout can name the bottleneck (CPU vs loss vs link) rather than
+    // just show a speed the user can't interpret.
     useEffect(() => {
         if (view === 'transferring') {
+            const cpuMonitor = new EventLoopLoadMonitor();
+            cpuMonitor.start();
             diagIntervalRef.current = setInterval(async () => {
                 const snap = await getDiagnosticSnapshot();
                 if (snap) {
+                    // channelStats throughput is bytes since the last reset (~1 s) per
+                    // channel; summed it is the current aggregate bytes/sec.
+                    const throughput = snap.channelStats.reduce((s, ch) => s + (ch.throughput || 0), 0);
+                    const cpuLoad = cpuMonitor.load;
+                    const lossRate = snap.lossRate ?? 0;
+                    const bottleneck = classifyBottleneck({ throughputBps: throughput, lossRate, cpuLoad });
                     setDiagnostics((prev) => ({
                         ...prev,
                         channelStats: snap.channelStats,
                         rtt: snap.rtt ?? prev.rtt,
                         transport: snap.transport ?? prev.transport,
+                        throughput,
+                        cpuLoad,
+                        lossRate,
+                        bottleneck,
                     }));
                     channelManagerRef.current?.resetStats();
                 }
             }, 1000);
+            return () => {
+                cpuMonitor.stop();
+                if (diagIntervalRef.current) clearInterval(diagIntervalRef.current);
+            };
         }
         return () => {
             if (diagIntervalRef.current) clearInterval(diagIntervalRef.current);
