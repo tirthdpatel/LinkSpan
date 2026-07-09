@@ -4,6 +4,10 @@
 
 No signup. No cloud storage on the default path. Files transfer directly between browsers using WebRTC.
 
+### 🚀 [Try it live → link-span-rosy.vercel.app](https://link-span-rosy.vercel.app/)
+
+Open the link on two devices, pair them, and send — nothing to install.
+
 [![CI](https://github.com/linkspan/linkspan/actions/workflows/ci.yml/badge.svg)](https://github.com/linkspan/linkspan/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 

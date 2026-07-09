@@ -294,8 +294,11 @@ export class SignalingClient {
                 break;
             case MSG.OFFER:
                 // N-peer room signaling carries `from`; 2-peer session signaling does not.
+                // Forward the iceRestart flag so the receiver refreshes ICE on the existing
+                // connection instead of re-creating channels (which would collide on the
+                // fixed negotiated ids).
                 if (data.from) this._emit('room-signal', { ...data, type: 'offer' });
-                else this._emit('offer', data.payload);
+                else this._emit('offer', data.payload, Boolean(data.iceRestart));
                 break;
             case MSG.ANSWER:
                 if (data.from) this._emit('room-signal', { ...data, type: 'answer' });

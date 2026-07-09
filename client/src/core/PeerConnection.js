@@ -5,6 +5,11 @@ import {
 } from '@shared/constants.js';
 import { getCachedIceServers } from './IceServers.js';
 
+// Grace period a 'disconnected' connection is given to self-heal before we force an
+// ICE restart. Long enough that a brief blip doesn't churn the connection, short enough
+// that a real network switch recovers quickly instead of sitting dead.
+const ICE_RESTART_GRACE_MS = 3000;
+
 /**
  * PeerConnection — Wraps RTCPeerConnection with ICE config, multi-channel setup,
  * ICE restart, and browser sleep/wake detection.
@@ -37,6 +42,10 @@ export class PeerConnection {
         this._iceServers = iceServers || getCachedIceServers();
         this._sleepDetector = null;
         this._lastSeen = Date.now();
+        /** @type {ReturnType<typeof setTimeout> | null} pending 'disconnected' → restart */
+        this._iceRestartTimer = null;
+        /** guards against overlapping ICE restarts (failed + disconnected racing) */
+        this._iceRestarting = false;
     }
 
     // ── Lifecycle ──────────────────────────────────────────────
@@ -61,11 +70,28 @@ export class PeerConnection {
             this.callbacks.onConnectionStateChange(state);
 
             if (state === 'failed') {
-                // Connection failed — attempt ICE restart
+                // Hard failure — restart immediately.
+                this._clearIceRestartTimer();
                 console.warn('[PeerConnection] Connection failed — attempting ICE restart');
-                this.restartIce().catch((err) => {
-                    console.error('[PeerConnection] ICE restart failed:', err);
-                });
+                this._tryIceRestart();
+            } else if (state === 'disconnected') {
+                // A network switch (Wi-Fi ↔ cellular) parks the connection in
+                // 'disconnected', often for 15–30 s before it ever reaches 'failed' —
+                // and sometimes it never does, so waiting for 'failed' alone leaves the
+                // transfer dead. Give it a short grace period to self-heal, then force an
+                // ICE restart so a network change recovers in place instead of stalling.
+                if (!this._iceRestartTimer) {
+                    this._iceRestartTimer = setTimeout(() => {
+                        this._iceRestartTimer = null;
+                        if (this.pc && this.pc.connectionState === 'disconnected') {
+                            console.warn('[PeerConnection] Still disconnected — attempting ICE restart');
+                            this._tryIceRestart();
+                        }
+                    }, ICE_RESTART_GRACE_MS);
+                }
+            } else if (state === 'connected' || state === 'completed') {
+                // Recovered on its own (or the restart worked) — cancel any pending retry.
+                this._clearIceRestartTimer();
             }
         };
 
@@ -162,6 +188,22 @@ export class PeerConnection {
         return restartOffer;
     }
 
+    /** Fire an ICE restart at most once at a time; recovery to 'connected' clears the guard. */
+    _tryIceRestart() {
+        if (this._iceRestarting) return;
+        this._iceRestarting = true;
+        this.restartIce()
+            .catch((err) => console.error('[PeerConnection] ICE restart failed:', err))
+            .finally(() => { this._iceRestarting = false; });
+    }
+
+    _clearIceRestartTimer() {
+        if (this._iceRestartTimer) {
+            clearTimeout(this._iceRestartTimer);
+            this._iceRestartTimer = null;
+        }
+    }
+
     // ── Stats ──────────────────────────────────────────────────
 
     /**
@@ -219,6 +261,7 @@ export class PeerConnection {
      */
     close() {
         this._stopSleepDetection();
+        this._clearIceRestartTimer();
 
         for (const ch of this.channels) {
             try { ch.close(); } catch { /* ignore */ }
