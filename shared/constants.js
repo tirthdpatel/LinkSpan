@@ -89,6 +89,11 @@ export const STALL_TIMEOUT_MS = 10_000; // 10 s — no chunk received → stalle
 export const BOTTLENECK_CPU_LOAD = 0.8;    // main-thread busy fraction → CPU-bound
 export const BOTTLENECK_LOSS_RATE = 0.02;  // ≥2% retransmits → congestion-bound
 export const BOTTLENECK_IDLE_BPS = 64 * 1024; // below this throughput → treat as idle, don't guess
+// Round-trip above this (ms) means the path is NOT local — a same-network LAN is <5 ms.
+// With no loss and low CPU, a high RTT means throughput is latency-bound (the window can't
+// cover the bandwidth-delay product), not the physical link being saturated. This is the
+// tell that a "same network" transfer is actually hairpinning through the internet.
+export const BOTTLENECK_HIGH_RTT_MS = 40;
 
 // ── Batch / Folder Transfer ────────────────────────────────────
 // A "batch" is one or more files and/or directories sent in a single transfer

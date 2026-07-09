@@ -245,13 +245,27 @@ export class PeerConnection {
         });
 
         let transport = null;
+        let pathType = null;
         if (selectedPair) {
             const localType = candidates.get(selectedPair.localCandidateId);
             const remoteType = candidates.get(selectedPair.remoteCandidateId);
             transport = (localType === 'relay' || remoteType === 'relay') ? 'turn' : 'direct';
+            // Finer than transport: which candidate types won the ICE race tells you the
+            // actual route. 'host' = local LAN addresses (fast). 'reflexive' (srflx/prflx) =
+            // public NAT-mapped addresses, i.e. the packets hairpin out through the internet
+            // even between two devices on the same Wi-Fi — the cause of a high "same-network"
+            // RTT. 'relay' = TURN.
+            const isReflexive = (t) => t === 'srflx' || t === 'prflx';
+            if (localType === 'relay' || remoteType === 'relay') {
+                pathType = 'relay';
+            } else if (isReflexive(localType) || isReflexive(remoteType)) {
+                pathType = 'reflexive'; // via internet, even between same-Wi-Fi devices
+            } else if (localType === 'host' && remoteType === 'host') {
+                pathType = 'host'; // true local LAN path
+            }
         }
 
-        return { rtt, bytesReceived, bytesSent, transport };
+        return { rtt, bytesReceived, bytesSent, transport, pathType };
     }
 
     // ── Cleanup ────────────────────────────────────────────────

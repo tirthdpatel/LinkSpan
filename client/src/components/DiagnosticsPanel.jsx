@@ -5,13 +5,22 @@ import React, { useState } from 'react';
 const BOTTLENECK_UI = {
     idle: { label: 'Idle', color: 'var(--text-muted)' },
     cpu: { label: 'CPU (main thread)', color: '#f59e0b' },
-    loss: { label: 'Loss / latency', color: '#ef4444' },
+    loss: { label: 'Packet loss', color: '#ef4444' },
+    latency: { label: 'Latency (non-local path)', color: '#f59e0b' },
     link: { label: 'Network link', color: '#40c057' },
+};
+
+// How the actual ICE route reads to a human. 'reflexive' is the important one: a "direct"
+// connection whose packets still hairpin out through the internet (high same-network RTT).
+const PATH_TYPE_UI = {
+    host: { label: 'host — local LAN', color: '#40c057' },
+    reflexive: { label: 'reflexive — via internet, not your LAN', color: '#f59e0b' },
+    relay: { label: 'relay', color: '#f59e0b' },
 };
 
 export function DiagnosticsPanel({
     channelStats = [], rtt, retryCount, verifiedChunks, storageMode, relayMode = false, stalled = false,
-    throughput = 0, cpuLoad = 0, lossRate = 0, bottleneck = { verdict: 'idle', reason: '' },
+    throughput = 0, cpuLoad = 0, lossRate = 0, bottleneck = { verdict: 'idle', reason: '' }, pathType = null,
 }) {
     const [expanded, setExpanded] = useState(false);
 
@@ -58,6 +67,9 @@ export function DiagnosticsPanel({
                             <span style={{ color: '#f59e0b' }}>Server relay (data passes through the LinkSpan server)</span>
                         ) : (
                             <span style={{ color: '#40c057' }}>Direct P2P (DTLS-encrypted DataChannel)</span>
+                        )}
+                        {!relayMode && pathType && PATH_TYPE_UI[pathType] && (
+                            <span style={{ color: PATH_TYPE_UI[pathType].color }}>· {PATH_TYPE_UI[pathType].label}</span>
                         )}
                         {stalled && <span style={{ color: '#ef4444' }}>· stalled, retrying…</span>}
                     </div>

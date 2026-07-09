@@ -934,6 +934,7 @@ export function useConnection({
             channelStats,
             rtt: pcStats?.rtt,
             transport: pcStats?.transport ?? null,
+            pathType: pcStats?.pathType ?? null,
             lossRate: loss?.lossRate ?? 0,
         };
     }, []);

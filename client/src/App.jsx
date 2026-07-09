@@ -51,6 +51,7 @@ const INITIAL_DIAGNOSTICS = {
     stalled: false,
     relayMode: false,
     transport: null, // 'direct' | 'turn' | null — how the P2P connection is routed
+    pathType: null, // 'host' | 'reflexive' | 'relay' | null — the actual ICE route
     encrypted: false, // true once the ECDH session key is agreed (app-layer E2E)
     throughput: 0, // aggregate bytes/sec across all channels, sampled each second
     cpuLoad: 0, // main-thread busy fraction [0,1] — high ⇒ encryption/hashing bound
@@ -193,12 +194,14 @@ export default function App() {
                     const throughput = snap.channelStats.reduce((s, ch) => s + (ch.throughput || 0), 0);
                     const cpuLoad = cpuMonitor.load;
                     const lossRate = snap.lossRate ?? 0;
-                    const bottleneck = classifyBottleneck({ throughputBps: throughput, lossRate, cpuLoad });
+                    const rttMs = snap.rtt != null ? snap.rtt * 1000 : 0;
+                    const bottleneck = classifyBottleneck({ throughputBps: throughput, lossRate, cpuLoad, rttMs });
                     setDiagnostics((prev) => ({
                         ...prev,
                         channelStats: snap.channelStats,
                         rtt: snap.rtt ?? prev.rtt,
                         transport: snap.transport ?? prev.transport,
+                        pathType: snap.pathType ?? prev.pathType,
                         throughput,
                         cpuLoad,
                         lossRate,

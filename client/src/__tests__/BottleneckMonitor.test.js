@@ -38,13 +38,30 @@ describe('classifyBottleneck', () => {
         expect(r.verdict).toBe('loss');
     });
 
-    test('link when pushing bytes with no loss and low CPU', () => {
+    test('latency when RTT is high with no loss/CPU pressure (non-local path)', () => {
+        const r = classifyBottleneck({
+            throughputBps: 4.5 * 1024 * 1024,
+            lossRate: 0,
+            cpuLoad: 0.01,
+            rttMs: 84, // the real "same-network" reading — actually an internet hairpin
+        });
+        expect(r.verdict).toBe('latency');
+        expect(r.reason).toMatch(/84ms/);
+    });
+
+    test('link when pushing bytes with no loss, low CPU, and LOW rtt', () => {
         const r = classifyBottleneck({
             throughputBps: 50 * 1024 * 1024,
             lossRate: 0,
             cpuLoad: 0.1,
+            rttMs: 3, // genuine LAN
         });
         expect(r.verdict).toBe('link');
+    });
+
+    test('CPU still wins over high RTT', () => {
+        const r = classifyBottleneck({ throughputBps: 1e6, cpuLoad: 0.9, rttMs: 200 });
+        expect(r.verdict).toBe('cpu');
     });
 
     test('handles missing input without throwing', () => {
