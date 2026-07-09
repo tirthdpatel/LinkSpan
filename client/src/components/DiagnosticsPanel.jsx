@@ -1,6 +1,18 @@
 import React, { useState } from 'react';
 
-export function DiagnosticsPanel({ channelStats = [], rtt, retryCount, verifiedChunks, storageMode, relayMode = false, stalled = false }) {
+// How the classifier's verdict is presented: label, accent colour, and the
+// one-line "what would actually help" guidance the readout exists to give.
+const BOTTLENECK_UI = {
+    idle: { label: 'Idle', color: 'var(--text-muted)' },
+    cpu: { label: 'CPU (main thread)', color: '#f59e0b' },
+    loss: { label: 'Loss / latency', color: '#ef4444' },
+    link: { label: 'Network link', color: '#40c057' },
+};
+
+export function DiagnosticsPanel({
+    channelStats = [], rtt, retryCount, verifiedChunks, storageMode, relayMode = false, stalled = false,
+    throughput = 0, cpuLoad = 0, lossRate = 0, bottleneck = { verdict: 'idle', reason: '' },
+}) {
     const [expanded, setExpanded] = useState(false);
 
     const formatThroughput = (bytesPerSec) => {
@@ -10,6 +22,8 @@ export function DiagnosticsPanel({ channelStats = [], rtt, retryCount, verifiedC
         const i = Math.floor(Math.log(bytesPerSec) / Math.log(k));
         return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     };
+
+    const verdict = BOTTLENECK_UI[bottleneck?.verdict] || BOTTLENECK_UI.idle;
 
     return (
         <div className="glass-card overflow-hidden animate-fade-in">
@@ -68,6 +82,40 @@ export function DiagnosticsPanel({ channelStats = [], rtt, retryCount, verifiedC
                             </div>
                             <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Storage</div>
                         </div>
+                    </div>
+
+                    {/* Bottleneck readout — throughput / CPU / loss, the three signals that
+                        tell you which lever (workers vs multi-PC vs nothing) would help. */}
+                    <div className="grid grid-cols-3 gap-3">
+                        <div className="stat-card text-center">
+                            <div className="text-sm font-bold font-mono" style={{ color: 'var(--text-primary)' }}>
+                                {formatThroughput(throughput)}
+                            </div>
+                            <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Throughput</div>
+                        </div>
+                        <div className="stat-card text-center">
+                            <div className="text-sm font-bold font-mono"
+                                style={{ color: cpuLoad >= 0.8 ? '#f59e0b' : 'var(--text-primary)' }}>
+                                {`${Math.round(cpuLoad * 100)}%`}
+                            </div>
+                            <div className="text-xs" style={{ color: 'var(--text-muted)' }}>CPU</div>
+                        </div>
+                        <div className="stat-card text-center">
+                            <div className="text-sm font-bold font-mono"
+                                style={{ color: lossRate >= 0.02 ? '#ef4444' : 'var(--text-primary)' }}>
+                                {`${(lossRate * 100).toFixed(1)}%`}
+                            </div>
+                            <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Loss</div>
+                        </div>
+                    </div>
+
+                    {/* Verdict — names the limiter and what would actually speed it up. */}
+                    <div className="flex items-start gap-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+                        <span className="font-medium flex-shrink-0">Bottleneck:</span>
+                        <span className="flex-shrink-0 font-semibold" style={{ color: verdict.color }}>
+                            {verdict.label}
+                        </span>
+                        {bottleneck?.reason && <span>· {bottleneck.reason}</span>}
                     </div>
 
                     {/* Per-Channel Stats */}

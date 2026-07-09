@@ -77,6 +77,19 @@ export const SENDER_CONCURRENCY = 4;
 export const MAX_RETRY_COUNT = 5;
 export const STALL_TIMEOUT_MS = 10_000; // 10 s — no chunk received → stalled
 
+// ── Bottleneck classification ──────────────────────────────────
+// Thresholds the diagnostics readout uses to guess WHY a transfer is at its
+// current speed — so the user (and we) can tell which lever actually helps
+// before investing in multi-PC striping or worker-based parallelism.
+//   - cpu   → main thread is pinned (encryption/hashing); Web Workers help.
+//   - loss  → retransmits are eating throughput (lossy/high-latency path);
+//             more independent congestion windows (multi-PC) help.
+//   - link  → nothing else is obviously constraining → the physical link is
+//             the ceiling; parallelism buys little. (Level-5 "well flow rate".)
+export const BOTTLENECK_CPU_LOAD = 0.8;    // main-thread busy fraction → CPU-bound
+export const BOTTLENECK_LOSS_RATE = 0.02;  // ≥2% retransmits → congestion-bound
+export const BOTTLENECK_IDLE_BPS = 64 * 1024; // below this throughput → treat as idle, don't guess
+
 // ── Batch / Folder Transfer ────────────────────────────────────
 // A "batch" is one or more files and/or directories sent in a single transfer
 // session (a folder, a multi-file selection, or a mix). The sender announces the

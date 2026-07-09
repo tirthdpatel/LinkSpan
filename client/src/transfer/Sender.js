@@ -54,9 +54,29 @@ export class Sender {
 
         /** @type {Map<number, number>} chunk index → retry count */
         this._retryCount = new Map();
+
+        // Loss accounting for the diagnostics readout. A request for an index we
+        // already delivered means the receiver never got it (its stall timer
+        // re-requested) — that duplicate is our observable loss signal.
+        this._chunkSends = 0;   // total successful chunk deliveries (incl. retransmits)
+        this._retransmits = 0;  // deliveries that re-sent an already-delivered index
     }
 
     // ── Public API ─────────────────────────────────────────────
+
+    /**
+     * Loss stats for diagnostics: fraction of chunk deliveries that were
+     * retransmits of an already-delivered index (i.e. the receiver lost them).
+     * @returns {{ sends: number, retransmits: number, lossRate: number }}
+     */
+    getLossStats() {
+        const sends = this._chunkSends;
+        return {
+            sends,
+            retransmits: this._retransmits,
+            lossRate: sends > 0 ? this._retransmits / sends : 0,
+        };
+    }
 
     /**
      * Get file metadata to send to receiver.
@@ -295,7 +315,10 @@ export class Sender {
             // already delivered, so without this guard _sentChunks would exceed
             // totalChunks (progress > 100%, negative ETA) on any lossy link.
             this._bytesSent += data.byteLength;
-            if (!this._sentIndices.has(index)) {
+            this._chunkSends++;
+            if (this._sentIndices.has(index)) {
+                this._retransmits++; // re-sending a delivered index → receiver lost it
+            } else {
                 this._sentIndices.add(index);
                 this._sentChunks = this._sentIndices.size;
             }
