@@ -3,7 +3,7 @@
  * Used by both signaling server and client.
  */
 
-export const PROTOCOL_VERSION = '1.7.0';
+export const PROTOCOL_VERSION = '1.8.0';
 
 // ── Transfer ───────────────────────────────────────────────────
 export const DEFAULT_CHUNK_SIZE = 256 * 1024; // 256 KB
@@ -48,7 +48,7 @@ export const MAX_CHANNELS = 7;
 // The capability is negotiated in-band (answer payload `multiConn`) and the extra
 // connections are multiplexed over the same signaling session via a `pcIndex`
 // field inside SDP/ICE payloads, so old peers and old servers are unaffected.
-export const EXTRA_PEER_CONNECTIONS = 3; // secondaries; total = 1 + this
+export const EXTRA_PEER_CONNECTIONS = 5; // secondaries; total = 1 + this (raised for high-RTT fat pipes)
 // Data channels per SECONDARY connection. Channels on one association share its
 // congestion window, so extra channels add head-of-line relief, not bandwidth;
 // a couple per secondary keeps meta+binary pairs flowing without the setup cost
@@ -66,7 +66,7 @@ export const MAX_IN_FLIGHT = 24;
 // bounds receiver memory for requested-but-unarrived chunks (128 × 256 KB = 32 MB)
 // and the bufferbloat feedback loop (queuing delay inflates measured RTT, which
 // would otherwise grow the window without bound).
-export const MAX_IN_FLIGHT_CAP = 128;
+export const MAX_IN_FLIGHT_CAP = 256; // raised so the window can fill long-RTT fat pipes (256 × 256 KB = 64 MB)
 // How many chunks the sender prepares (read → hash → encrypt) and sends
 // concurrently when serving a range request. The previous strictly-serial loop
 // left the CPU idle during each chunk's async crypto and the channels idle during
@@ -450,6 +450,11 @@ export const TRANSFER_MSG = {
     PAUSE: 'pause',
     RESUME: 'resume',
     RESUME_ACK: 'resume-ack',
+    // Cross-session resume progress (proto 1.8.0): when a resumed receiver already holds
+    // some chunks of a file, it sends this right after FILE_META so the SENDER can seed its
+    // progress counter to the receiver's already-have count — otherwise the sender's UI
+    // starts at 0% even though the receiver is halfway. Payload: { fileId, received }.
+    RESUME_PROGRESS: 'resume-progress',
 };
 
 // ── Opt-in aggregate telemetry (privacy-first; default OFF) ────
@@ -526,10 +531,12 @@ export const ERR = {
 // throughput cap on lossy or high-latency (relay/cross-network) paths. LinkSpan reassembles
 // by explicit chunk index and the Receiver now buffers a binary frame that outruns its
 // metadata, so it no longer depends on ordering. Flipping this to `false` (reliable but
-// UNORDERED) removes the HOL stall; do it once measured against the live Bottleneck readout,
-// since the win only shows on paths with actual loss/latency.
+// UNORDERED) removes the HOL stall; the win shows on paths with actual loss/latency.
+// Now flipped to false: LinkSpan reassembles by explicit chunk index and the Receiver
+// buffers a binary frame that outruns its metadata (see Receiver._pendingData), so
+// out-of-order delivery is handled and no longer stalls the pipe behind a lost packet.
 export const CHANNEL_CONFIG = {
-    ordered: true,
+    ordered: false,
 };
 
 export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB
