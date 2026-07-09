@@ -80,6 +80,15 @@ export class Receiver {
         this.retryCount = new Map();
         /** @type {Map<number, { hash: string, size: number }>} pending hash metadata */
         this._pendingMeta = new Map();
+        /**
+         * @type {Map<number, ArrayBuffer>} binary chunks that arrived before their metadata.
+         * Each chunk is sent as a metadata frame then a binary frame; ordered channels
+         * guarantee that order, but so the protocol also survives UNORDERED channels (which
+         * remove head-of-line blocking on lossy links), a binary frame that outruns its
+         * metadata is buffered here and processed when the metadata lands — instead of being
+         * wastefully re-requested.
+         */
+        this._pendingData = new Map();
 
         this._active = false;
         this._paused = false;
@@ -138,8 +147,13 @@ export class Receiver {
                 if (typeof rawData === 'string') {
                     const msg = JSON.parse(rawData);
                     if (msg.type === TRANSFER_MSG.CHUNK_DATA) {
-                        // Store hash metadata, binary data comes next
                         this._pendingMeta.set(msg.index, { hash: msg.hash, size: msg.size });
+                        // If the binary frame already arrived (unordered channel), process it now.
+                        const early = this._pendingData.get(msg.index);
+                        if (early !== undefined) {
+                            this._pendingData.delete(msg.index);
+                            await this._handleChunkData(msg.index, early);
+                        }
                     } else if (msg.type === TRANSFER_MSG.RESUME_ACK) {
                         // Sender acknowledged resume — restart requesting from missing chunks
                         this._requestNextChunks();
@@ -148,7 +162,12 @@ export class Receiver {
                     }
                 } else if (rawData instanceof ArrayBuffer) {
                     const { index, data } = ChunkManager.unpackChunk(rawData);
-                    await this._handleChunkData(index, data);
+                    if (this._pendingMeta.has(index)) {
+                        await this._handleChunkData(index, data);
+                    } else {
+                        // Metadata hasn't landed yet — hold the binary until it does.
+                        this._pendingData.set(index, data);
+                    }
                 }
             } catch (err) {
                 console.error('[Receiver] Error handling message:', err);
@@ -310,9 +329,10 @@ export class Receiver {
 
         // Mark as received in ResumeManager (persisted via debounce)
         this.resumeManager.markChunkReceived(this.fileMeta.fileId, index);
-        // Awaited: the recorded hash feeds the whole-file manifest root, which must
-        // be complete before we request/verify the manifest on the last chunk.
-        await this.verifier.recordChunk(index, plaintext);
+        // Record the hash for the whole-file manifest root. verifyChunk above already
+        // proved meta.hash IS the plaintext's hash, so store it directly instead of
+        // hashing the chunk a second time (one SHA-256 per chunk saved on the hot path).
+        this.verifier.recordChunkHash(index, meta.hash);
 
         this._bytesReceived += plaintext.byteLength;
 
@@ -481,6 +501,26 @@ export class Receiver {
     }
 
     /**
+     * Compute the whole-file root for verification. Prefer the per-chunk hashes already
+     * recorded this session (verified against the sender as each chunk landed): they give
+     * the identical root without re-reading the whole file from storage. For a multi-GB
+     * file that re-read is a second full pass over disk — slow, and it reopens the window
+     * where an OPFS/disk-backed blob read can throw NotFoundError and lose a completed
+     * transfer. Only when hashes are missing (a resumed transfer whose earlier chunks were
+     * hashed in a prior process) do we fall back to re-reading the assembled blob.
+     * @param {Blob} blob
+     * @returns {Promise<string>}
+     */
+    async _computeRoot(blob) {
+        const ordered = this.verifier.getOrderedHashes(this.totalChunks);
+        if (ordered.length === this.totalChunks && ordered.every((h) => h)) {
+            const { rootHash } = await FileManifest.buildFromHashes(ordered);
+            return rootHash;
+        }
+        return this._computeRootFromBlob(blob);
+    }
+
+    /**
      * Assemble the file, verify the whole-file manifest root, and only then hand the
      * blob to the caller. A root mismatch (missing/reordered/substituted data) fails
      * loudly rather than delivering a corrupt file.
@@ -497,7 +537,7 @@ export class Receiver {
             const fileBlob = await this.storageManager.assembleFile();
 
             if (expectedRoot) {
-                const actualRoot = await this._computeRootFromBlob(fileBlob);
+                const actualRoot = await this._computeRoot(fileBlob);
                 if (actualRoot !== expectedRoot) {
                     this.onError(new Error('Whole-file verification failed: manifest root mismatch'));
                     return;

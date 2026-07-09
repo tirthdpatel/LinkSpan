@@ -516,6 +516,13 @@ export const ERR = {
 };
 
 // ── DataChannel Config ─────────────────────────────────────────
+// `ordered: true` gives SCTP in-order delivery, which causes head-of-line blocking:
+// one delayed/retransmitted packet stalls everything behind it on that channel — a real
+// throughput cap on lossy or high-latency (relay/cross-network) paths. LinkSpan reassembles
+// by explicit chunk index and the Receiver now buffers a binary frame that outruns its
+// metadata, so it no longer depends on ordering. Flipping this to `false` (reliable but
+// UNORDERED) removes the HOL stall; do it once measured against the live Bottleneck readout,
+// since the win only shows on paths with actual loss/latency.
 export const CHANNEL_CONFIG = {
     ordered: true,
 };

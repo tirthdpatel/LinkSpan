@@ -48,6 +48,18 @@ export class IntegrityVerifier {
     }
 
     /**
+     * Record a chunk's ALREADY-COMPUTED hash without re-hashing the data. The receiver
+     * verifies each chunk against the sender's committed hash; on success that hash is,
+     * by definition, the hash of the plaintext — so recording it directly avoids a second
+     * SHA-256 pass over every chunk (the manifest root still covers the full set).
+     * @param {number} index
+     * @param {string} hash - hex-encoded SHA-256, already verified against the plaintext
+     */
+    recordChunkHash(index, hash) {
+        this.chunkHashes.set(index, hash);
+    }
+
+    /**
      * Get a chunk's recorded hash.
      * @param {number} index
      * @returns {string | undefined}
