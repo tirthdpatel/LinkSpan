@@ -22,6 +22,7 @@ import {
     BOTTLENECK_CPU_LOAD,
     BOTTLENECK_LOSS_RATE,
     BOTTLENECK_IDLE_BPS,
+    BOTTLENECK_HIGH_RTT_MS,
 } from '@shared/constants.js';
 
 const SAMPLE_INTERVAL_MS = 250;
@@ -79,9 +80,10 @@ export class EventLoopLoadMonitor {
  * @param {number} s.throughputBps - aggregate bytes/sec right now
  * @param {number} s.lossRate      - retransmits / total sends, in [0, 1]
  * @param {number} s.cpuLoad       - main-thread busy fraction, in [0, 1]
- * @returns {{ verdict: 'idle'|'cpu'|'loss'|'link', reason: string }}
+ * @param {number} s.rttMs         - round-trip time in ms (0/undefined if unknown)
+ * @returns {{ verdict: 'idle'|'cpu'|'loss'|'latency'|'link', reason: string }}
  */
-export function classifyBottleneck({ throughputBps = 0, lossRate = 0, cpuLoad = 0 } = {}) {
+export function classifyBottleneck({ throughputBps = 0, lossRate = 0, cpuLoad = 0, rttMs = 0 } = {}) {
     if (throughputBps < BOTTLENECK_IDLE_BPS && cpuLoad < BOTTLENECK_CPU_LOAD) {
         return { verdict: 'idle', reason: 'Not enough traffic to measure yet' };
     }
@@ -89,7 +91,16 @@ export function classifyBottleneck({ throughputBps = 0, lossRate = 0, cpuLoad = 
         return { verdict: 'cpu', reason: 'Main thread is saturated — Web Workers would help' };
     }
     if (lossRate >= BOTTLENECK_LOSS_RATE) {
-        return { verdict: 'loss', reason: 'Retransmits from a lossy/high-latency path — multiple connections would help' };
+        return { verdict: 'loss', reason: 'Retransmits from a lossy path — multiple connections would help' };
+    }
+    // High RTT with no loss/CPU pressure: throughput is latency-bound (the window can't fill
+    // the pipe), NOT the link saturated. A same-network transfer should be <5 ms — a high
+    // value means it's routing through the internet, not the LAN. Fix the direct path.
+    if (rttMs >= BOTTLENECK_HIGH_RTT_MS) {
+        return {
+            verdict: 'latency',
+            reason: `High round-trip (${Math.round(rttMs)}ms) is the limit — not a local path. On the same network this should be <5ms; you're likely routing through the internet.`,
+        };
     }
     return { verdict: 'link', reason: 'Link appears saturated — parallelism buys little here' };
 }
