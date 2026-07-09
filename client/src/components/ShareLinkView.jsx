@@ -45,7 +45,13 @@ function CreateShare({ client, onClose }) {
             });
             setResult(link);
         } catch (err) {
-            setError(err.message || 'Failed to create share link');
+            // A NotReadableError means the OS couldn't read the picked file (moved,
+            // permission revoked, or too large for this device) — guide the user.
+            const readFailed = err?.name === 'NotReadableError'
+                || /could not be read/i.test(err?.message || '');
+            setError(readFailed
+                ? 'Could not read that file — it may have moved or be too large for this device. Try re-selecting it or picking a smaller file.'
+                : (err.message || 'Failed to create share link'));
         } finally {
             setBusy(false);
         }
