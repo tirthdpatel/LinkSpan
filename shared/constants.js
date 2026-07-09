@@ -48,7 +48,10 @@ export const MAX_CHANNELS = 7;
 // The capability is negotiated in-band (answer payload `multiConn`) and the extra
 // connections are multiplexed over the same signaling session via a `pcIndex`
 // field inside SDP/ICE payloads, so old peers and old servers are unaffected.
-export const EXTRA_PEER_CONNECTIONS = 5; // secondaries; total = 1 + this (raised for high-RTT fat pipes)
+export const EXTRA_PEER_CONNECTIONS = 3; // secondaries; total = 1 + this
+// NOTE: briefly raised to 5 in the speed swarm, then reverted — a reflexive P2P transfer
+// that worked pre-swarm started stalling, so we restored the known-good connection-layer
+// config (this + ordered channels + Google-only STUN). Re-raise only with a tested path.
 // Data channels per SECONDARY connection. Channels on one association share its
 // congestion window, so extra channels add head-of-line relief, not bandwidth;
 // a couple per secondary keeps meta+binary pairs flowing without the setup cost
@@ -526,17 +529,16 @@ export const ERR = {
 };
 
 // ── DataChannel Config ─────────────────────────────────────────
-// `ordered: true` gives SCTP in-order delivery, which causes head-of-line blocking:
-// one delayed/retransmitted packet stalls everything behind it on that channel — a real
-// throughput cap on lossy or high-latency (relay/cross-network) paths. LinkSpan reassembles
-// by explicit chunk index and the Receiver now buffers a binary frame that outruns its
-// metadata, so it no longer depends on ordering. Flipping this to `false` (reliable but
-// UNORDERED) removes the HOL stall; the win shows on paths with actual loss/latency.
-// Now flipped to false: LinkSpan reassembles by explicit chunk index and the Receiver
-// buffers a binary frame that outruns its metadata (see Receiver._pendingData), so
-// out-of-order delivery is handled and no longer stalls the pipe behind a lost packet.
+// REVERTED to `ordered: true`. The swarm flipped this to `false` (unordered) to dodge
+// head-of-line blocking, but negotiated channels (negotiated:true, fixed ids) require BOTH
+// peers to agree on this flag — a peer still on a cached pre-swarm build uses `true`, and
+// the mismatch (plus the untested-against-real-reordering flip itself) coincides with
+// reflexive P2P transfers that worked pre-swarm now stalling. `true` matches every existing
+// client and is the known-good config. The Receiver._pendingData reorder buffer stays in
+// place, so re-enabling unordered later (behind a FILE_META capability flag, so it's only
+// used when BOTH peers support it) is safe and won't need a receiver change.
 export const CHANNEL_CONFIG = {
-    ordered: false,
+    ordered: true,
 };
 
 export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB
