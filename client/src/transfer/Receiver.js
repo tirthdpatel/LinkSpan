@@ -10,6 +10,7 @@ import { ChunkManager } from './ChunkManager.js';
 import { IntegrityVerifier } from './IntegrityVerifier.js';
 import { FileManifest } from './FileManifest.js';
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
+import { maybeDecompress } from './Compression.js';
 
 /**
  * Receiver — Receiver-driven pull model for parallel chunk download.
@@ -78,7 +79,7 @@ export class Receiver {
         this._rttEwma = null;
         /** @type {Map<number, number>} chunk index → retry count */
         this.retryCount = new Map();
-        /** @type {Map<number, { hash: string, size: number }>} pending hash metadata */
+        /** @type {Map<number, { hash: string, size: number, compressed: boolean }>} pending hash metadata */
         this._pendingMeta = new Map();
         /**
          * @type {Map<number, ArrayBuffer>} binary chunks that arrived before their metadata.
@@ -139,6 +140,19 @@ export class Receiver {
         // Initialize storage for this file
         await this.storageManager.initFile(this.fileMeta);
 
+        // On a resume, seed the sender's progress display before we start pulling.
+        // The ledger init above may have recovered already-received chunks; tell the
+        // sender how many we hold so its UI doesn't restart from 0. Skipped for a
+        // fresh transfer (received === 0) where there's nothing to seed.
+        const received = this.totalChunks - this.getMissingChunks().length;
+        if (received > 0) {
+            await this.channelManager.sendAny(JSON.stringify({
+                type: TRANSFER_MSG.RESUME_PROGRESS,
+                fileId: this.fileMeta.fileId,
+                received,
+            })).catch(() => { /* sender may not support it / be gone */ });
+        }
+
         // Listen for incoming data
         this.channelManager.onMessage(async (rawData) => {
             if (!this._active) return;
@@ -147,7 +161,7 @@ export class Receiver {
                 if (typeof rawData === 'string') {
                     const msg = JSON.parse(rawData);
                     if (msg.type === TRANSFER_MSG.CHUNK_DATA) {
-                        this._pendingMeta.set(msg.index, { hash: msg.hash, size: msg.size });
+                        this._pendingMeta.set(msg.index, { hash: msg.hash, size: msg.size, compressed: msg.compressed });
                         // If the binary frame already arrived (unordered channel), process it now.
                         const early = this._pendingData.get(msg.index);
                         if (early !== undefined) {
@@ -192,6 +206,10 @@ export class Receiver {
 
     /**
      * Cancel the transfer — stop and notify sender.
+     *
+     * Note: the ResumeManager ledger is intentionally NOT cleared here. Already-received
+     * chunks are kept so a retry resumes from where it left off; the ledger is only
+     * cleared in _finalize() on verified, successful completion.
      */
     cancel() {
         this._active = false;
@@ -292,11 +310,17 @@ export class Receiver {
 
         // Decrypt (no-op if no session key). A GCM auth failure throws — treat it
         // exactly like a hash mismatch (tampered/corrupted chunk → retry).
+        // Then decompress (no-op unless the sender flagged this chunk compressed);
+        // both size and hash are committed over the PLAINTEXT, so we must undo the
+        // wire compression before verifying. A decompress failure (corrupt deflate
+        // stream) is treated the same as a decrypt failure → integrity check fails
+        // → chunk is re-requested.
         let plaintext;
         try {
             plaintext = this.cryptoKey
                 ? await CryptoEngine.decryptChunk(this.cryptoKey, data)
                 : data;
+            plaintext = await maybeDecompress(plaintext, meta.compressed);
         } catch {
             plaintext = null;
         }

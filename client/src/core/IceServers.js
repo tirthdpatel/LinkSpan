@@ -20,9 +20,17 @@
  *     cache is warm by the time it's read.
  */
 
+// Dual-stack (IPv6-capable) public STUN servers. The browser gathers IPv6 host
+// and server-reflexive (srflx) candidates automatically when the OS has IPv6 —
+// querying STUN over a dual-stack server lets peers discover their IPv6 srflx
+// address, and since IPv6 typically has no NAT, two peers on different networks
+// can often form a DIRECT connection over IPv6 without ever touching a TURN relay.
+// Keep these reachable over both A/AAAA so candidate gathering isn't stuck on IPv4.
 const STUN_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.nextcloud.com:443' },
 ];
 
 const FETCH_TIMEOUT_MS = 3000;   // pairing shouldn't stall on a slow credential fetch
