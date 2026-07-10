@@ -39,15 +39,27 @@ const KEY_EXCHANGE_TIMEOUT_MS = 45_000;
 // Handshake frames sent before the other peer has switched onto the relay are
 // silently dropped, so the public key is retransmitted until the exchange settles.
 const KEY_EXCHANGE_RETRANSMIT_MS = 2_000;
+// Watchdog for the FIRST (P2P) handshake attempt. A live DataChannel completes the
+// exchange sub-second; if nothing comes back within this window the channel is open
+// but silent, so we abandon P2P and force the server relay. Comfortably above the
+// retransmit interval so a couple of key frames get a chance first.
+const P2P_HANDSHAKE_WATCHDOG_MS = 8_000;
 
-export function performKeyExchange(cm) {
+export function performKeyExchange(cm, { timeoutMs = KEY_EXCHANGE_TIMEOUT_MS } = {}) {
     return new Promise((resolve, reject) => {
         let settled = false;
         let retransmit = null;
         const stopRetransmit = () => { if (retransmit) { clearInterval(retransmit); retransmit = null; } };
-        const fail = (err) => { if (!settled) { settled = true; stopRetransmit(); reject(err); } };
+        const fail = (err) => {
+            if (!settled) {
+                settled = true;
+                stopRetransmit();
+                try { cm.onMessage(null); } catch { /* handler may not be installed yet */ }
+                reject(err);
+            }
+        };
 
-        const timeout = setTimeout(() => fail(new Error('Key exchange timed out')), KEY_EXCHANGE_TIMEOUT_MS);
+        const timeout = setTimeout(() => fail(new Error('Key exchange timed out')), timeoutMs);
 
         CryptoEngine.generateECDHKeyPair()
             .then(async (keyPair) => {
@@ -137,6 +149,10 @@ export function useConnection({
     // ── Engine refs ─────────────────────────────────────────────
     const signalingRef = useRef(null);
     const peerRef = useRef(null);
+    // Exposes the in-flight connection's relay-activation function (set inside
+    // initConnection) so the handshake watchdog can force a relay fallback when the
+    // P2P channel opens but never carries any application data.
+    const activateRelayRef = useRef(null);
     // Secondary peer connections for multi-connection striping (Phase 3).
     const multiConnRef = useRef(null);
     const channelManagerRef = useRef(null);
@@ -186,6 +202,7 @@ export function useConnection({
         multiConnRef.current = null;
         peerRef.current = null;
         signalingRef.current = null;
+        activateRelayRef.current = null;
         // Abort any pending SAS verification so its promise doesn't dangle.
         if (sasGateRef.current) {
             sasGateRef.current.reject(new Error('Connection closed.'));
@@ -361,22 +378,32 @@ export function useConnection({
                 });
 
                 // Switch the active channel to the server relay (fallback or forced).
-                // Idempotent: only the first call resolves the channel-ready promise.
-                let relayActivating = false;
-                const activateRelay = async () => {
-                    if (relayActivating || !channelReadyResolve) return;
-                    relayActivating = true;
-                    const relay = new RelayChannel(signaling);
-                    await relay.activate();
-                    channelManagerRef.current = relay;
-                    relayActiveRef.current = true;
-                    setDiagnostics((prev) => ({ ...prev, relayMode: true }));
-                    if (channelReadyResolve) {
-                        const res = channelReadyResolve;
-                        channelReadyResolve = null;
-                        res(relay);
-                    }
+                // Memoized: every caller (ICE 'failed', 'relay-ready', the handshake
+                // watchdog, FORCE_RELAY) shares one activation and awaits the SAME relay,
+                // so a concurrent second call can't read channelManagerRef before the
+                // swap lands. Works even after the P2P channel opened — a channel can
+                // report "open" while carrying no data, and we must still be able to fall
+                // back then (channelReadyResolve is already consumed in that case, so we
+                // just swap the active channel without re-resolving the ready promise).
+                let relayActivation = null;
+                const activateRelay = () => {
+                    if (relayActivation) return relayActivation;
+                    relayActivation = (async () => {
+                        const relay = new RelayChannel(signaling);
+                        await relay.activate();
+                        channelManagerRef.current = relay;
+                        relayActiveRef.current = true;
+                        setDiagnostics((prev) => ({ ...prev, relayMode: true }));
+                        if (channelReadyResolve) {
+                            const res = channelReadyResolve;
+                            channelReadyResolve = null;
+                            res(relay);
+                        }
+                        return relay;
+                    })();
+                    return relayActivation;
                 };
+                activateRelayRef.current = activateRelay;
 
                 // Ephemeral TURN credentials from the server when configured (cached,
                 // 3s timeout, falls back to static env / STUN-only — never throws).
@@ -622,6 +649,38 @@ export function useConnection({
         });
     }, [setTransferState, setError, setSessionId, setPairingCode, setDiagnostics]);
 
+    // ── Secure-channel establishment with a connected-but-silent watchdog ──
+    // A WebRTC DataChannel can reach readyState 'open' while never actually carrying
+    // application bytes — e.g. a channel-config skew between app versions, or a NAT
+    // path that passes the DTLS/SCTP handshake but blocks sustained SCTP data. ICE
+    // reports 'connected', not 'failed', so the 'failed'→relay path never runs and the
+    // key exchange just retransmits into the void until KEY_EXCHANGE_TIMEOUT_MS (45s),
+    // then fails with no recovery — the classic "stuck at 0/0". This wrapper gives the
+    // P2P handshake a short deadline; if no handshake frame comes back in time, it
+    // forces the server-relay fallback and retries the handshake there. On a channel
+    // that already carries data the handshake completes in well under a second, so a
+    // healthy P2P transfer never trips the watchdog.
+    const establishSecureChannel = useCallback(async (cm) => {
+        // Already relayed (forced, or ICE failed before the channel opened): no P2P
+        // handshake to watchdog — run the exchange with the full generous timeout.
+        if (relayActiveRef.current || !activateRelayRef.current) {
+            const { key, sas } = await performKeyExchange(cm);
+            return { key, sas, cm };
+        }
+        try {
+            const { key, sas } = await performKeyExchange(cm, { timeoutMs: P2P_HANDSHAKE_WATCHDOG_MS });
+            return { key, sas, cm };
+        } catch {
+            // The P2P handshake never settled. Fall back to the relay and retry there.
+            // (A concurrent 'relay-ready' may already have swapped us — activateRelay is
+            // memoized, so we simply await the same relay and use the live channel.)
+            console.warn('[useConnection] P2P handshake stalled — falling back to server relay');
+            const relayCm = await activateRelayRef.current();
+            const { key, sas } = await performKeyExchange(relayCm);
+            return { key, sas, cm: relayCm };
+        }
+    }, []);
+
     // ── Send Batch (files / folders) ─────────────────────────────
 
     /**
@@ -640,13 +699,13 @@ export function useConnection({
         try {
             const cm = await initConnection('sender');
             // Agree an end-to-end session key before any file data is sent.
-            const { key: cryptoKey, sas } = await performKeyExchange(cm);
+            const { key: cryptoKey, sas, cm: activeCm } = await establishSecureChannel(cm);
             setDiagnostics((prev) => ({ ...prev, encrypted: true }));
             // MITM defence: both peers must confirm the SAS matches before any
             // file data leaves this device.
             await waitForSasConfirmation(sas);
 
-            const batchSender = new BatchSender(batch, cm, cryptoKey, {
+            const batchSender = new BatchSender(batch, activeCm, cryptoKey, {
                 onFileProgress: (fileIndex, sent, total, speed, entry) => {
                     setCurrentFileIndex(fileIndex);
                     setTransferProgress((prev) => ({
@@ -717,7 +776,7 @@ export function useConnection({
         } catch (err) {
             if (err?.message) setError({ message: err.message });
         }
-    }, [initConnection, setView, setCurrentFileIndex, setError, setDiagnostics, setTransferState, setTransferProgress, waitForSasConfirmation, _recordHistory]);
+    }, [initConnection, establishSecureChannel, setView, setCurrentFileIndex, setError, setDiagnostics, setTransferState, setTransferProgress, waitForSasConfirmation, _recordHistory]);
 
     // ── Receive Batch ────────────────────────────────────────────
 
@@ -754,16 +813,19 @@ export function useConnection({
             // installs its channel handler the moment the handshake frees it, so it
             // catches BATCH_META / FILE_META even while the SAS dialog is open (the
             // pull-based protocol means no file data flows until a receiver requests).
-            const verifiedKeyPromise = performKeyExchange(cm).then(async ({ key, sas }) => {
-                setDiagnostics((prev) => ({ ...prev, encrypted: true }));
-                batchReceiver?.start();
-                await waitForSasConfirmation(sas);
-                return key;
-            });
+            // Establish the handshake first (this may transparently fall back to the
+            // relay if the P2P channel opened but stays silent) so the BatchReceiver is
+            // bound to whichever channel actually carries data.
+            const { key, sas, cm: activeCm } = await establishSecureChannel(cm);
+            setDiagnostics((prev) => ({ ...prev, encrypted: true }));
+            // Release the session key only after the user confirms the SAS; the receiver
+            // still listens for BATCH_META immediately (nothing decrypts until this
+            // resolves, and no file data is requested until approval).
+            const verifiedKeyPromise = waitForSasConfirmation(sas).then(() => key);
             verifiedKeyPromise.catch(() => {});
 
             batchReceiver = new BatchReceiver(
-                cm,
+                activeCm,
                 verifiedKeyPromise,
                 {
                     // Approval policy (Feature 4): auto-accept remembered senders
@@ -888,12 +950,15 @@ export function useConnection({
                 }
             );
             receiverRef.current = batchReceiver;
+            // Listen for BATCH_META / FILE_META right away; decryption is gated behind
+            // verifiedKeyPromise (SAS) and no file data is pulled until approval.
+            batchReceiver.start();
         } catch (err) {
             // Allow a genuine retry after a real connection/join failure.
             receiveInFlightRef.current = false;
             if (err?.message) setError({ message: err.message });
         }
-    }, [initConnection, setView, setDiagnostics, setTransferProgress, setTransferState, setCurrentFileIndex, setError, onTransferComplete, waitForSasConfirmation, waitForReceiveApproval, _recordHistory]);
+    }, [initConnection, establishSecureChannel, setView, setDiagnostics, setTransferProgress, setTransferState, setCurrentFileIndex, setError, onTransferComplete, waitForSasConfirmation, waitForReceiveApproval, _recordHistory]);
 
     // ── Transfer Controls ────────────────────────────────────────
 
