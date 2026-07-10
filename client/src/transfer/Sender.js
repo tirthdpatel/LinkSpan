@@ -2,7 +2,7 @@ import { ChunkManager } from './ChunkManager.js';
 import { IntegrityVerifier } from './IntegrityVerifier.js';
 import { FileManifest } from './FileManifest.js';
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
-import { maybeCompress } from './Compression.js';
+import { maybeCompress, isFileCompressible } from './Compression.js';
 import {
     TRANSFER_MSG,
     MAX_RETRY_COUNT,
@@ -38,6 +38,10 @@ export class Sender {
         // Dynamic chunk size (Phase 4.3): scaled to the file, capped so the framed
         // ciphertext (header + IV + tag) stays within the 256 KB DataChannel limit.
         this.chunkManager = new ChunkManager(file, pickChunkSize(file.size, !!cryptoKey));
+        // Decide once per file whether compression can help. Already-compressed media
+        // (video/audio/images/archives) skip deflate entirely — attempting it on every
+        // chunk of a large H.264 video is pure wasted CPU that never shrinks the data.
+        this._compressChunks = isFileCompressible(file);
         this.channelManager = channelManager;
         this.onProgress = onProgress;
         this.onCancel = onCancel;
@@ -299,8 +303,11 @@ export class Sender {
             // Compress the plaintext before encryption (only if it actually shrinks;
             // maybeCompress returns the original bytes with compressed=false otherwise).
             // Compressing inside the ciphertext keeps the hash/verification semantics
-            // over the original plaintext.
-            const { data: payloadPlain, compressed } = await maybeCompress(data);
+            // over the original plaintext. Skipped wholesale for already-compressed
+            // files so we don't deflate-and-discard every chunk of e.g. a video.
+            const { data: payloadPlain, compressed } = this._compressChunks
+                ? await maybeCompress(data)
+                : { data, compressed: false };
 
             // Encrypt before it leaves this peer (no-op if no session key).
             const payload = this.cryptoKey

@@ -21,6 +21,48 @@
 export const compressionSupported =
     typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
 
+// Formats whose bytes are already compressed (media, containers, archives).
+// Re-deflating them can't shrink them and just burns CPU — for a 14 GB H.264 video
+// that's ~57k chunks deflated and thrown away. We decide ONCE per file (by MIME or
+// extension) and skip compression for every chunk when it can't help. Anything not
+// listed keeps the safe per-chunk "compress only if it actually shrinks" behavior.
+const INCOMPRESSIBLE_EXTENSIONS = new Set([
+    // video
+    'mp4', 'm4v', 'mkv', 'mov', 'avi', 'webm', 'flv', 'wmv', 'mpg', 'mpeg', 'ts', '3gp',
+    // audio
+    'mp3', 'aac', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wma',
+    // already-compressed raster images
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif',
+    // archives / compressed streams
+    'zip', 'rar', '7z', 'gz', 'tgz', 'bz2', 'xz', 'zst', 'br', 'lz4', 'cab',
+    // already-zipped document/app containers
+    'pdf', 'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'apk', 'jar', 'epub',
+]);
+
+function extensionOf(name) {
+    if (typeof name !== 'string') return '';
+    const dot = name.lastIndexOf('.');
+    return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+/**
+ * Whether a whole file is worth attempting to compress. Already-compressed
+ * media/containers return false so the sender skips deflate entirely for them.
+ * Unknown types return true and fall back to the per-chunk shrink check, so we
+ * never lose a real compression win (text, logs, uncompressed images, etc.).
+ * @param {{ name?: string, type?: string }} [file]
+ * @returns {boolean}
+ */
+export function isFileCompressible(file = {}) {
+    const type = (file.type || '').toLowerCase();
+    if (type.startsWith('video/') || type.startsWith('audio/')) return false;
+    // Compressed raster images only — bmp/tiff/svg stay compressible.
+    if (/^image\/(jpeg|png|gif|webp|heic|heif|avif)$/.test(type)) return false;
+    if (/(zip|gzip|x-7z|x-rar|x-xz|zstd|x-bzip|compress)/.test(type)) return false;
+    if (type === 'application/pdf') return false;
+    return !INCOMPRESSIBLE_EXTENSIONS.has(extensionOf(file.name));
+}
+
 async function streamThrough(input, stream) {
     const src = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
     const out = new Response(new Blob([src]).stream().pipeThrough(stream));

@@ -5,6 +5,7 @@ import {
     deflateRaw,
     inflateRaw,
     compressionSupported,
+    isFileCompressible,
 } from '../transfer/Compression.js';
 
 const enc = (s) => new TextEncoder().encode(s).buffer;
@@ -46,5 +47,31 @@ describe('Compression codec (per-chunk DEFLATE)', () => {
     test('deflateRaw/inflateRaw round-trip', async () => {
         const original = enc('the quick brown fox '.repeat(500));
         expect(eq(await inflateRaw(await deflateRaw(original)), original)).toBe(true);
+    });
+});
+
+describe('isFileCompressible (skip already-compressed formats)', () => {
+    test('skips compressed media/archives by MIME', () => {
+        expect(isFileCompressible({ type: 'video/mp4' })).toBe(false);
+        expect(isFileCompressible({ type: 'audio/mpeg' })).toBe(false);
+        expect(isFileCompressible({ type: 'image/jpeg' })).toBe(false);
+        expect(isFileCompressible({ type: 'image/png' })).toBe(false);
+        expect(isFileCompressible({ type: 'application/zip' })).toBe(false);
+        expect(isFileCompressible({ type: 'application/pdf' })).toBe(false);
+    });
+
+    test('skips compressed formats by extension when MIME is missing', () => {
+        for (const name of ['clip.mp4', 'movie.MKV', 'song.flac', 'photo.jpg', 'a.7z', 'doc.pdf', 'sheet.xlsx']) {
+            expect(isFileCompressible({ name, type: '' })).toBe(false);
+        }
+    });
+
+    test('keeps compressible formats and unknown types', () => {
+        expect(isFileCompressible({ name: 'notes.txt', type: 'text/plain' })).toBe(true);
+        expect(isFileCompressible({ name: 'data.csv', type: 'text/csv' })).toBe(true);
+        expect(isFileCompressible({ name: 'raw.bmp', type: 'image/bmp' })).toBe(true);
+        expect(isFileCompressible({ name: 'icon.svg', type: 'image/svg+xml' })).toBe(true);
+        expect(isFileCompressible({ name: 'blob', type: '' })).toBe(true); // unknown → try
+        expect(isFileCompressible({})).toBe(true);
     });
 });

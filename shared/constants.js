@@ -66,17 +66,21 @@ export const SECONDARY_PC_CHANNELS = 2;
 export const MAX_IN_FLIGHT = 24;
 // Ceiling for the ADAPTIVE receiver window (see Receiver._updateWindow). The window
 // starts at MAX_IN_FLIGHT and grows toward measured-BDP on long fat pipes; the cap
-// bounds receiver memory for requested-but-unarrived chunks (128 × 256 KB = 32 MB)
+// bounds receiver memory for requested-but-unarrived chunks (512 × 256 KB = 128 MB)
 // and the bufferbloat feedback loop (queuing delay inflates measured RTT, which
-// would otherwise grow the window without bound).
-export const MAX_IN_FLIGHT_CAP = 256; // raised so the window can fill long-RTT fat pipes (256 × 256 KB = 64 MB)
+// would otherwise grow the window without bound). Only the ceiling changes here — the
+// startup window, growth logic and retransmit logic are untouched, so slow/lossy paths
+// behave exactly as before; only very fast fat pipes reach higher. Receiver-local: the
+// sender just serves whatever's requested, so an un-updated peer is unaffected.
+export const MAX_IN_FLIGHT_CAP = 512; // fill long-RTT / 10 GbE fat pipes (512 × 256 KB = 128 MB)
 // How many chunks the sender prepares (read → hash → encrypt) and sends
 // concurrently when serving a range request. The previous strictly-serial loop
 // left the CPU idle during each chunk's async crypto and the channels idle during
 // each other's sends; a small worker pool overlaps that work across the parallel
-// data channels. Kept modest so crypto/CPU contention and channel backpressure
-// stay bounded.
-export const SENDER_CONCURRENCY = 4;
+// data channels. 8 keeps all 7 primary channels fed while the off-thread WebCrypto
+// of one chunk overlaps the reads/sends of others; still bounded so CPU contention
+// and channel backpressure stay in check. Purely sender-local — no wire impact.
+export const SENDER_CONCURRENCY = 8;
 export const MAX_RETRY_COUNT = 5;
 export const STALL_TIMEOUT_MS = 10_000; // 10 s — no chunk received → stalled
 
@@ -545,6 +549,8 @@ export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB
 // High-water mark for per-channel send backpressure. send() blocks once a
 // channel's bufferedAmount exceeds this, then resumes on bufferedamountlow. At
 // 256 KB chunks the old limit (BUFFERED_AMOUNT_LOW_THRESHOLD × 4 = 256 KB) drained
-// after a single buffered chunk, so a fast link kept stalling between chunks. 1 MB
-// lets a channel hold a few chunks in its send buffer and stay saturated.
-export const SEND_HIGH_WATER_MARK = 1024 * 1024; // 1 MB
+// after a single buffered chunk, so a fast link kept stalling between chunks. 4 MB
+// lets each channel hold ~16 chunks in its send buffer and stay saturated on a fast
+// link without draining between sends. Still bounded (backpressure resumes on
+// bufferedamountlow), so buffering never grows without limit. Sender-local.
+export const SEND_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4 MB
