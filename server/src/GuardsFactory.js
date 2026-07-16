@@ -39,7 +39,8 @@ export async function createGuards() {
 
     if (process.env.REDIS_URL) {
         try {
-            const client = createClient({ url: process.env.REDIS_URL });
+            // pingInterval: keep the connection alive through idle-reaping proxies.
+            const client = createClient({ url: process.env.REDIS_URL, pingInterval: 30_000 });
             client.on('error', (err) => console.error('[Guards Redis] Error:', err.message));
             await client.connect();
             console.log('[GuardsFactory] Using Redis-backed rate limiting + brute-force');

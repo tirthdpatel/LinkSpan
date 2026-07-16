@@ -911,11 +911,23 @@ async function bootstrap() {
             }
         };
 
+        // Run handleMessage with a rejection guard. Redis-backed calls inside the
+        // handler (createSession, addPeer, sendToOtherPeer, …) reject when the
+        // Redis connection is down; without this catch that rejection is an
+        // unhandled promise rejection and kills the whole process — one flaky
+        // Redis socket turned into a crash-loop for every connected user.
+        const runMessage = (raw) => {
+            handleMessage(raw).catch((err) => {
+                console.error('[LinkSpan] Message handler error:', err?.message || err);
+                sendError(ws, ERR.CONNECTION_FAILED, 'Temporary server error. Please retry.');
+            });
+        };
+
         // Attach the listener synchronously (see admission-gate note above).
         ws.on('message', (raw) => {
             if (admitted === false) return;          // rejected connection — drop
             if (admitted === null) { pendingFrames.push(raw); return; } // not yet decided
-            handleMessage(raw);
+            runMessage(raw);
         });
 
         // Remove this peer from any room it's in and tell the others.
@@ -930,27 +942,37 @@ async function bootstrap() {
         };
 
         ws.on('close', async () => {
-            leaveRoomOnDisconnect();
-            if (boundSessionId) {
-                // Notify the peer before removing ourselves from the session.
-                await sessionManager.sendToOtherPeer(boundSessionId, peerId, {
-                    type: MSG.SESSION_CLOSED,
-                    reason: 'peer-disconnected',
-                });
-                metricsCollector.decrementActiveSessions();
-                auditLogger.sessionClosed(boundSessionId, { peerId, reason: 'close' });
-                // AWAIT: removePeer is async on Redis backend
-                await sessionManager.removePeer(boundSessionId, peerId);
-                boundSessionId = null;
+            // try/catch: sendToOtherPeer/removePeer hit Redis and reject when it's
+            // down — an uncaught rejection here would crash the process.
+            try {
+                leaveRoomOnDisconnect();
+                if (boundSessionId) {
+                    // Notify the peer before removing ourselves from the session.
+                    await sessionManager.sendToOtherPeer(boundSessionId, peerId, {
+                        type: MSG.SESSION_CLOSED,
+                        reason: 'peer-disconnected',
+                    });
+                    metricsCollector.decrementActiveSessions();
+                    auditLogger.sessionClosed(boundSessionId, { peerId, reason: 'close' });
+                    // AWAIT: removePeer is async on Redis backend
+                    await sessionManager.removePeer(boundSessionId, peerId);
+                    boundSessionId = null;
+                }
+            } catch (err) {
+                console.error('[LinkSpan] Close handler error:', err?.message || err);
             }
         });
 
         ws.on('error', async () => {
-            leaveRoomOnDisconnect();
-            if (boundSessionId) {
-                metricsCollector.decrementActiveSessions();
-                await sessionManager.removePeer(boundSessionId, peerId);
-                boundSessionId = null;
+            try {
+                leaveRoomOnDisconnect();
+                if (boundSessionId) {
+                    metricsCollector.decrementActiveSessions();
+                    await sessionManager.removePeer(boundSessionId, peerId);
+                    boundSessionId = null;
+                }
+            } catch (err) {
+                console.error('[LinkSpan] Error handler cleanup failed:', err?.message || err);
             }
         });
 
@@ -966,7 +988,7 @@ async function bootstrap() {
         admitted = true;
         // Drain any frames that arrived during the admission check, in order.
         const queued = pendingFrames.splice(0);
-        for (const raw of queued) handleMessage(raw);
+        for (const raw of queued) runMessage(raw);
     });
 
     // ── Graceful Shutdown ──────────────────────────────────────
