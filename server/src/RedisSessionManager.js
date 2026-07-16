@@ -39,7 +39,10 @@ export class RedisSessionManager {
      * @param {string} redisUrl - Redis connection URL (e.g., redis://localhost:6379)
      */
     constructor(redisUrl) {
-        this._client = createClient({ url: redisUrl });
+        // pingInterval keeps the connection non-idle — hosting proxies (Render's
+        // Key Value included) silently reap idle TCP connections, which otherwise
+        // surfaces as SocketClosedUnexpectedlyError on every quiet period.
+        this._client = createClient({ url: redisUrl, pingInterval: 30_000 });
         this._client.on('error', (err) => console.error('[Redis] Error:', err.message));
         /** @type {Map<string, Map<string, WebSocket>>} sessionId → peerId → ws */
         this._wsRegistry = new Map();

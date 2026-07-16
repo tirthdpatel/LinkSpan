@@ -159,7 +159,10 @@ export async function createWebhookStore(env = process.env) {
     if (env.REDIS_URL) {
         try {
             const { createClient } = await import('redis');
-            const client = createClient({ url: env.REDIS_URL });
+            const client = createClient({ url: env.REDIS_URL, pingInterval: 30_000 });
+            // Without an 'error' listener, a dropped Redis socket emits an
+            // unhandled 'error' event and crashes the whole process.
+            client.on('error', (err) => console.error('[WebhookStore Redis] Error:', err.message));
             await client.connect();
             console.log('[WebhookStore] Using Redis store');
             return new RedisWebhookStore(client);
