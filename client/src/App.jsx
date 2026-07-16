@@ -354,7 +354,7 @@ export default function App() {
                 }
                 isTransferring={isTransferring && !isTransferComplete}
             />
-            <Header darkMode={darkMode} onToggleDark={() => setDarkMode((d) => !d)} />
+            <Header darkMode={darkMode} onToggleDark={() => setDarkMode((d) => !d)} onHome={handleBack} />
 
             <main className="flex-1 flex flex-col items-center justify-center px-4 py-8 relative z-10">
                 {error && (
@@ -642,21 +642,6 @@ export default function App() {
                 )}
             </main>
 
-            <footer
-                className="text-center py-4 text-xs relative z-10"
-                style={{ color: 'var(--text-muted)' }}
-            >
-                LinkSpan — Open source, zero cost, peer-to-peer.{' '}
-                <a
-                    href="https://github.com/linkspan"
-                    className="underline hover:no-underline"
-                    style={{ color: 'var(--gradient-start)' }}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                >
-                    GitHub
-                </a>
-            </footer>
         </div>
     );
 }
