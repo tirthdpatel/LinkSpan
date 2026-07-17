@@ -194,6 +194,33 @@ export class SessionManager {
         return session || null;
     }
 
+    // ── Session Metadata ───────────────────────────────────────
+
+    /**
+     * Store arbitrary per-session metadata (e.g. creator country for geo detection).
+     * Cleaned up automatically when the session is destroyed.
+     * @param {string} sessionId
+     * @param {string} key
+     * @param {*} value
+     */
+    setMeta(sessionId, key, value) {
+        const session = this.sessions.get(sessionId);
+        if (!session) return;
+        if (!session._meta) session._meta = {};
+        session._meta[key] = value;
+    }
+
+    /**
+     * Retrieve per-session metadata.
+     * @param {string} sessionId
+     * @param {string} key
+     * @returns {*} value or null
+     */
+    getMeta(sessionId, key) {
+        const session = this.sessions.get(sessionId);
+        return session?._meta?.[key] ?? null;
+    }
+
     // ── Lifecycle ──────────────────────────────────────────────
 
     /**

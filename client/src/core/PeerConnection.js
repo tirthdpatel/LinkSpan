@@ -33,7 +33,7 @@ export class PeerConnection {
      * @param {RTCIceServer[]} [iceServers] resolved list (e.g. from resolveIceServers());
      *   defaults to the synchronous cache/static fallback.
      */
-    constructor(callbacks, iceServers) {
+    constructor(callbacks, iceServers, opts = {}) {
         this.callbacks = callbacks;
         /** @type {RTCPeerConnection | null} */
         this.pc = null;
@@ -46,6 +46,20 @@ export class PeerConnection {
         this._iceRestartTimer = null;
         /** guards against overlapping ICE restarts (failed + disconnected racing) */
         this._iceRestarting = false;
+        // Intercontinental hint: when true, suppress private-IP host candidates
+        // that can never work across continents, reducing ICE negotiation noise.
+        this._intercontinental = !!opts.intercontinental;
+    }
+
+    /**
+     * Set the intercontinental hint after construction. The server's geo hint
+     * (see MSG.GEO_HINT) arrives on signaling *after* the PeerConnection is built
+     * but before ICE candidate gathering completes, so callers flip this on as soon
+     * as the hint lands to filter the remaining host candidates.
+     * @param {boolean} value
+     */
+    setIntercontinental(value) {
+        this._intercontinental = !!value;
     }
 
     // ── Lifecycle ──────────────────────────────────────────────
@@ -61,6 +75,13 @@ export class PeerConnection {
 
         this.pc.onicecandidate = (event) => {
             if (event.candidate) {
+                // When peers are on different continents, private-IP host candidates
+                // (10.x, 172.16-31.x, 192.168.x) can never connect. Suppressing them
+                // reduces ICE candidate churn and speeds up relay/srflx selection by
+                // ~2-5s on intercontinental paths.
+                if (this._intercontinental && this._isPrivateHostCandidate(event.candidate)) {
+                    return; // don't send to signaling server
+                }
                 this.callbacks.onIceCandidate(event.candidate.toJSON());
             }
         };
@@ -112,11 +133,14 @@ export class PeerConnection {
      * @param {Function} onChannelReady - called with (channel, index) when each channel opens
      * @param {number} [count] - channels to create (default MAX_CHANNELS; secondary
      *        peer connections use fewer — see SECONDARY_PC_CHANNELS)
+     * @param {object} [channelConfig] - DataChannel config override (e.g.
+     *        UNORDERED_CHANNEL_CONFIG). Defaults to CHANNEL_CONFIG (ordered).
+     *        Both peers MUST use the same config for negotiated channels.
      */
-    createChannels(onChannelReady, count = MAX_CHANNELS) {
+    createChannels(onChannelReady, count = MAX_CHANNELS, channelConfig = CHANNEL_CONFIG) {
         for (let i = 0; i < count; i++) {
             const channel = this.pc.createDataChannel(`transfer-${i}`, {
-                ...CHANNEL_CONFIG,
+                ...channelConfig,
                 id: i,
                 negotiated: true,
             });
@@ -346,5 +370,25 @@ export class PeerConnection {
                 document.removeEventListener('resume', this._onResume);
             }
         }
+    }
+
+    // ── Intercontinental ICE optimization ──────────────────────
+
+    /**
+     * Returns true if the candidate is a host candidate with a private (RFC1918) IP.
+     * These can never work across continents, so filtering them out speeds up ICE.
+     * @param {RTCIceCandidate} candidate
+     * @returns {boolean}
+     */
+    _isPrivateHostCandidate(candidate) {
+        if (candidate.type !== 'host') return false;
+        const addr = candidate.address || '';
+        // RFC1918 private ranges
+        if (addr.startsWith('10.')) return true;
+        if (addr.startsWith('192.168.')) return true;
+        if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(addr)) return true;
+        // IPv6 link-local
+        if (addr.startsWith('fe80:')) return true;
+        return false;
     }
 }

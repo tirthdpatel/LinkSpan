@@ -1,5 +1,9 @@
 /**
  * IntegrityVerifier — SHA-256 per-chunk and full-file integrity verification.
+ *
+ * Optionally delegates hashing to a {@link HashWorkerPool} to keep the main thread
+ * free for UI and transfer orchestration. When no pool is set, hashing runs via
+ * crypto.subtle.digest on the main thread (backward compatible).
  */
 export class IntegrityVerifier {
     /**
@@ -33,6 +37,17 @@ export class IntegrityVerifier {
     constructor() {
         /** @type {Map<number, string>} chunk index → hash */
         this.chunkHashes = new Map();
+        /** @type {import('../crypto/HashWorkerPool.js').HashWorkerPool|null} */
+        this._workerPool = null;
+    }
+
+    /**
+     * Attach a HashWorkerPool for off-main-thread hashing. When set, recordChunk()
+     * delegates to the pool. When null or unavailable, falls back to main-thread.
+     * @param {import('../crypto/HashWorkerPool.js').HashWorkerPool|null} pool
+     */
+    setWorkerPool(pool) {
+        this._workerPool = pool;
     }
 
     /**
@@ -42,7 +57,14 @@ export class IntegrityVerifier {
      * @returns {Promise<string>}
      */
     async recordChunk(index, data) {
-        const hash = await IntegrityVerifier.hash(data);
+        let hash;
+        if (this._workerPool?.available) {
+            // Clone the buffer before transferring — the caller (Sender) may still
+            // need the original data for encryption and sending after hashing.
+            hash = await this._workerPool.hash(data.slice(0));
+        } else {
+            hash = await IntegrityVerifier.hash(data);
+        }
         this.chunkHashes.set(index, hash);
         return hash;
     }

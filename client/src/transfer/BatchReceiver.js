@@ -57,6 +57,9 @@ export class BatchReceiver {
         // (preserving structure) instead of being packaged into a ZIP for download.
         this.getDestination = factories.getDestination || null;
         this.writeTree = factories.writeTree || null;
+        // Measured handshake RTT (ms), threaded to each per-file Receiver for
+        // initial window sizing. 0 = unknown/LAN.
+        this.measuredRttMs = factories.measuredRttMs || 0;
 
         this._active = false;
         this._finalized = false;
@@ -246,7 +249,8 @@ export class BatchReceiver {
             },
             (err) => this._fail(err),
             () => this.cb.onStalled?.(),
-            cryptoKey
+            cryptoKey,
+            this.measuredRttMs
         );
         this._activeReceiver = receiver;
 

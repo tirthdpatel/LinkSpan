@@ -26,16 +26,27 @@ export const ENCRYPTED_CHUNK_SIZE = DEFAULT_CHUNK_SIZE - GCM_OVERHEAD_BYTES; // 
  * single all-or-nothing chunk), and use the max for large files to minimise
  * per-chunk control-message and round-trip overhead.
  *
+ * When measured RTT is provided, medium-sized files (1–100 MB) are upgraded to
+ * max chunk size on high-RTT paths. On a 200ms link, cutting from 256 KB to 64 KB
+ * chunks quadruples the number of request-response round-trips — each costing 200ms.
+ * Using the max chunk size for medium files on high-RTT links keeps round-trip count
+ * low while small files retain fine-grained progress.
+ *
  * @param {number} fileSize - total file size in bytes
  * @param {boolean} [encrypted=true] - whether app-layer encryption is active
+ * @param {number} [rttMs=0] - measured round-trip time in ms (0 = unknown/LAN)
  * @returns {number} plaintext chunk size in bytes
  */
 export const CHUNK_HEADER_BYTES = 4; // packChunk Uint32 index prefix
-export function pickChunkSize(fileSize, encrypted = true) {
+export function pickChunkSize(fileSize, encrypted = true, rttMs = 0) {
     const overhead = CHUNK_HEADER_BYTES + (encrypted ? GCM_OVERHEAD_BYTES : 0);
     const max = DEFAULT_CHUNK_SIZE - overhead; // largest plaintext that frames ≤ 256 KB
     if (!Number.isFinite(fileSize) || fileSize <= 0) return max;
     if (fileSize <= 1 * 1024 * 1024) return Math.min(64 * 1024, max);   // ≤ 1 MB  → 64 KB
+    // High-RTT paths: always use max chunk size for medium+ files to minimize
+    // per-chunk round-trip overhead. A 100 MB file at 64 KB chunks = 1600 chunks;
+    // at max (~256 KB) = ~400 chunks — 4× fewer request cycles, each saving 200ms.
+    if (rttMs > 100) return max;
     if (fileSize <= 100 * 1024 * 1024) return Math.min(256 * 1024, max); // ≤ 100 MB → ~256 KB (capped)
     return max;                                                          // large    → max
 }
@@ -73,6 +84,24 @@ export const MAX_IN_FLIGHT = 24;
 // behave exactly as before; only very fast fat pipes reach higher. Receiver-local: the
 // sender just serves whatever's requested, so an un-updated peer is unaffected.
 export const MAX_IN_FLIGHT_CAP = 512; // fill long-RTT / 10 GbE fat pipes (512 × 256 KB = 128 MB)
+
+/**
+ * Select the initial pull-window based on measured handshake RTT. On high-RTT paths
+ * (intercontinental), starting with a larger window fills the bandwidth-delay product
+ * from the first request burst instead of spending dozens of round-trips in slow-start.
+ * The adaptive _updateWindow() logic in Receiver still shrinks on loss / grows on
+ * capacity — this only speeds up the first few seconds.
+ *
+ * @param {number} rttMs - measured round-trip time in ms (0 or falsy = unknown/LAN)
+ * @returns {number} initial window size in chunks
+ */
+export function initialWindowForRtt(rttMs) {
+    if (!Number.isFinite(rttMs) || rttMs <= 0) return MAX_IN_FLIGHT;
+    if (rttMs > 200) return 128;  // intercontinental (US ↔ India, US ↔ SEA)
+    if (rttMs > 100) return 64;   // cross-region (US-east ↔ US-west, EU ↔ US)
+    if (rttMs > 40)  return 32;   // moderate (same country, different city)
+    return MAX_IN_FLIGHT;          // LAN / same metro — default is fine
+}
 // How many chunks the sender prepares (read → hash → encrypt) and sends
 // concurrently when serving a range request. The previous strictly-serial loop
 // left the CPU idle during each chunk's async crypto and the channels idle during
@@ -311,6 +340,16 @@ export const SHARE_DEFAULT_EXPIRY_MS = SHARE_EXPIRY_PRESETS['24h'];
 
 // Per-link and global storage ceilings (disk-exhaustion defense).
 export const SHARE_MAX_BLOB_BYTES = 5 * 1024 * 1024 * 1024;   // 5 GB per link
+// Ceiling the BROWSER client can actually share. Unlike P2P (which streams 256 KB
+// chunks), the browser share-link path reads+encrypts the WHOLE file into one
+// contiguous ArrayBuffer before upload — and a single ArrayBuffer maxes out around
+// 2 GB in V8/Chrome (far less under memory pressure or on mobile), with encryption
+// needing a second full-size buffer on top. So the browser refuses a share above this
+// up front with a clear message (use direct P2P for larger files) instead of throwing
+// a cryptic "ArrayBuffer allocation failed" mid-encrypt. This is a browser-memory
+// limit, NOT a protocol/storage limit — a streaming SDK/CLI client can still use the
+// full SHARE_MAX_BLOB_BYTES. Raise once the browser path streams chunked encryption+upload.
+export const SHARE_MAX_CLIENT_BLOB_BYTES = 1536 * 1024 * 1024; // 1.5 GB
 export const SHARE_MAX_FILENAME_LENGTH = 255;
 export const SHARE_MAX_DOWNLOADS_CAP = 1_000_000;             // sanity cap on maxDownloads
 // A download password is verified server-side (scrypt). Brute force is bounded by the
@@ -386,6 +425,11 @@ export const MSG = {
     // Server → Client
     SESSION_CREATED: 'session-created',
     PEER_JOINED: 'peer-joined',
+    // Best-effort optimization hint sent to the joining peer when the server detects
+    // (from proxy geo headers) that the two peers are on different continents. Drives
+    // client-side ICE candidate filtering (private-host suppression). Never a security
+    // signal. The sender/creator receives the same hint piggybacked on PEER_JOINED.
+    GEO_HINT: 'geo-hint',
     SESSION_ERROR: 'session-error',
     SESSION_CLOSED: 'session-closed',
     RELAY_READY: 'relay-ready',
@@ -462,6 +506,18 @@ export const TRANSFER_MSG = {
     // progress counter to the receiver's already-have count — otherwise the sender's UI
     // starts at 0% even though the receiver is halfway. Payload: { fileId, received }.
     RESUME_PROGRESS: 'resume-progress',
+    // Sender-push protocol (intercontinental optimization): lightweight ACK from the
+    // receiver carrying { highestContiguous } — the index of the highest chunk received
+    // without a gap. The sender uses this to advance its push window, eliminating one
+    // RTT per window of data vs. the pull model. Capability-negotiated: both peers
+    // advertise `supportsPush` in FILE_META; when absent, the transfer runs in classic
+    // pull mode (CHUNK_REQUEST / CHUNK_REQUEST_RANGE).
+    PUSH_ACK: 'push-ack',
+    // Forward Error Correction (intercontinental optimization): XOR parity data for
+    // a group of N consecutive chunks. When exactly one chunk in the group is lost,
+    // the receiver reconstructs it from parity ⊕ received_chunks without a round-trip.
+    // Capability-negotiated: both peers advertise `supportsFec` in FILE_META.
+    FEC_PARITY: 'fec-parity',
 };
 
 // ── Opt-in aggregate telemetry (privacy-first; default OFF) ────
@@ -533,16 +589,22 @@ export const ERR = {
 };
 
 // ── DataChannel Config ─────────────────────────────────────────
-// REVERTED to `ordered: true`. The swarm flipped this to `false` (unordered) to dodge
-// head-of-line blocking, but negotiated channels (negotiated:true, fixed ids) require BOTH
-// peers to agree on this flag — a peer still on a cached pre-swarm build uses `true`, and
-// the mismatch (plus the untested-against-real-reordering flip itself) coincides with
-// reflexive P2P transfers that worked pre-swarm now stalling. `true` matches every existing
-// client and is the known-good config. The Receiver._pendingData reorder buffer stays in
-// place, so re-enabling unordered later (behind a FILE_META capability flag, so it's only
-// used when BOTH peers support it) is safe and won't need a receiver change.
+// Default: `ordered: true`. This is the known-good config that matches every existing
+// client. The Receiver._pendingData reorder buffer handles out-of-order delivery, so
+// unordered channels don't need any receiver-side changes.
 export const CHANNEL_CONFIG = {
     ordered: true,
+};
+
+// Unordered channels eliminate head-of-line blocking: when a single SCTP packet is
+// lost on a lossy intercontinental link (200ms RTT, 2% loss), ordered channels stall
+// the entire stream for 1+ RTT while SCTP retransmits. Unordered channels let
+// subsequent chunks arrive immediately; the Receiver's _pendingData / _pendingMeta
+// maps already reassemble them. Activated ONLY when both peers negotiate support
+// via `supportsUnordered: true` in BATCH_META / FILE_META — old clients never see
+// this flag and continue with ordered channels (backward compatible).
+export const UNORDERED_CHANNEL_CONFIG = {
+    ordered: false,
 };
 
 export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB

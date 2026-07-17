@@ -1,5 +1,8 @@
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
 import { readBlobToArrayBuffer } from '../transfer/blobReader.js';
+import { SHARE_MAX_CLIENT_BLOB_BYTES } from '@shared/constants.js';
+
+const _gb = (n) => `${(n / (1024 ** 3)).toFixed(1)} GB`;
 
 /**
  * ShareLinkClient — browser client for the LinkSpan share-link REST API.

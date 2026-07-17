@@ -20,14 +20,18 @@
  *     cache is warm by the time it's read.
  */
 
-// STUN servers for host/srflx candidate discovery. Reverted to the pre-swarm Google-only
-// list: the extra dual-stack STUN servers were added in the speed swarm, and since a
-// reflexive P2P transfer that WORKED before the swarm started stalling after it, we restore
-// the exact known-good connection-layer config and will re-add IPv6 STUN behind a tested
-// path. (The browser still gathers IPv6 host candidates automatically.)
+// STUN servers for host/srflx candidate discovery. Google's anycast STUN servers
+// are free, highly available, and on different anycast IPs — the browser's ICE agent
+// tries all in parallel and the fastest response wins. More geographic diversity
+// means faster reflexive candidate discovery, especially on intercontinental paths
+// where the nearest server may be 200+ms away. (stun2-4 were removed in the swarm
+// revert, but the ordered-channel fix is separate; these are safe to re-add.)
 const STUN_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
 ];
 
 const FETCH_TIMEOUT_MS = 3000;   // pairing shouldn't stall on a slow credential fetch

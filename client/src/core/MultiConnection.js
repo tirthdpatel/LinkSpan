@@ -31,15 +31,36 @@ export class MultiConnection {
      * @param {import('./ChannelManager.js').ChannelManager} opts.channelManager
      * @param {RTCIceServer[]} [opts.iceServers]
      */
-    constructor({ signaling, channelManager, iceServers }) {
+    constructor({ signaling, channelManager, iceServers, channelConfig }) {
         this._signaling = signaling;
         this._channelManager = channelManager;
         this._iceServers = iceServers;
+        // When both peers negotiate supportsUnordered, secondary connections use
+        // unordered channels to eliminate head-of-line blocking. Defaults to
+        // undefined (PeerConnection.createChannels uses ordered CHANNEL_CONFIG).
+        this._channelConfig = channelConfig;
+        // Intercontinental geo hint (set via setIntercontinental once the server's
+        // GEO_HINT lands). Propagated to every secondary PeerConnection so their ICE
+        // gathering also suppresses private-host candidates on cross-continent paths.
+        this._intercontinental = false;
         /** @type {Map<number, PeerConnection>} pcIndex → secondary connection */
         this._pcs = new Map();
         /** @type {Map<number, RTCIceCandidateInit[]>} candidates that arrived early */
         this._pendingCandidates = new Map();
         this._closed = false;
+    }
+
+    /**
+     * Apply the intercontinental geo hint. Propagates to every secondary connection —
+     * both those already created and any opened later. Safe to call before or after
+     * openSecondaries/acceptSecondary.
+     * @param {boolean} value
+     */
+    setIntercontinental(value) {
+        this._intercontinental = !!value;
+        for (const peer of this._pcs.values()) {
+            peer.setIntercontinental?.(this._intercontinental);
+        }
     }
 
     /** How many secondaries to open given what the remote advertised. */
@@ -156,10 +177,12 @@ export class MultiConnection {
             // PeerConnection auto-restarts ICE on 'failed'; route the restart offer
             // back through signaling with our tag so the peer renegotiates this PC.
             onIceRestartRequired: (offer) => this._signaling.sendOffer({ ...offer, pcIndex }),
-        }, this._iceServers);
+        }, this._iceServers, { intercontinental: this._intercontinental });
         peer.init();
         // Negotiated channels: both sides create the same count with matching ids.
-        peer.createChannels(() => {}, SECONDARY_PC_CHANNELS);
+        // When unordered channels are negotiated, secondary connections use them to
+        // eliminate head-of-line blocking on lossy intercontinental links.
+        peer.createChannels(() => {}, SECONDARY_PC_CHANNELS, this._channelConfig);
         this._channelManager.addChannels(peer.channels);
         this._pcs.set(pcIndex, peer);
         return peer;

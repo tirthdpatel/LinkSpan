@@ -66,6 +66,10 @@ export function performKeyExchange(cm, { timeoutMs = KEY_EXCHANGE_TIMEOUT_MS } =
                 const ourPub = await CryptoEngine.exportPublicKey(keyPair);
                 const sendPub = () =>
                     cm.sendAny(JSON.stringify({ type: TRANSFER_MSG.KEY_EXCHANGE, pub: ourPub }));
+                // RTT measurement: timestamp the first send; the peer's response gives us
+                // a round-trip sample before any transfer begins. This drives initial
+                // receiver window sizing and chunk size selection for high-RTT paths.
+                let firstSendTs = 0;
 
                 const handler = async (rawData) => {
                     if (settled || typeof rawData !== 'string') return;
@@ -79,6 +83,8 @@ export function performKeyExchange(cm, { timeoutMs = KEY_EXCHANGE_TIMEOUT_MS } =
                         settled = true;
                         stopRetransmit();
                         clearTimeout(timeout);
+                        // RTT sample: time from our first send to the peer's response.
+                        const rttMs = firstSendTs > 0 ? Date.now() - firstSendTs : 0;
                         // Echo our key once more before finishing: receiving the peer's key
                         // proves THEY are on the channel, but not that they ever received
                         // OURS (every earlier copy may have been dropped while they were
@@ -87,7 +93,7 @@ export function performKeyExchange(cm, { timeoutMs = KEY_EXCHANGE_TIMEOUT_MS } =
                         // typed message switches unhandled.
                         try { await sendPub(); } catch { /* channel gone — peer will time out */ }
                         cm.onMessage(null); // release the handshake handler
-                        resolve({ key, sas });
+                        resolve({ key, sas, rttMs });
                     } catch (err) {
                         clearTimeout(timeout);
                         fail(err);
@@ -95,6 +101,7 @@ export function performKeyExchange(cm, { timeoutMs = KEY_EXCHANGE_TIMEOUT_MS } =
                 };
                 cm.onMessage(handler);
 
+                firstSendTs = Date.now();
                 await sendPub();
                 retransmit = setInterval(() => {
                     Promise.resolve(sendPub()).catch(() => { /* retried on next tick */ });
@@ -487,7 +494,21 @@ export function useConnection({
                     }
                 });
 
-                signaling.on('peer-joined', async () => {
+                // Intercontinental geo hint (best-effort, server-detected from proxy
+                // country headers). Flip ICE private-host filtering on for the primary
+                // and every secondary connection. Idempotent — may arrive via the
+                // sender's PEER_JOINED payload or the receiver's dedicated GEO_HINT.
+                const applyGeoHint = (data) => {
+                    if (!data?.intercontinental) return;
+                    peer.setIntercontinental?.(true);
+                    multiConnRef.current?.setIntercontinental?.(true);
+                };
+                signaling.on('geo-hint', applyGeoHint);
+
+                signaling.on('peer-joined', async (data) => {
+                    // Apply the geo hint before ICE gathering starts so private-host
+                    // candidates are suppressed from the first candidate onward.
+                    applyGeoHint(data);
                     if (role === 'sender') {
                         setTransferState(TRANSFER_STATE.CONNECTING);
 
@@ -664,20 +685,20 @@ export function useConnection({
         // Already relayed (forced, or ICE failed before the channel opened): no P2P
         // handshake to watchdog — run the exchange with the full generous timeout.
         if (relayActiveRef.current || !activateRelayRef.current) {
-            const { key, sas } = await performKeyExchange(cm);
-            return { key, sas, cm };
+            const { key, sas, rttMs } = await performKeyExchange(cm);
+            return { key, sas, rttMs, cm };
         }
         try {
-            const { key, sas } = await performKeyExchange(cm, { timeoutMs: P2P_HANDSHAKE_WATCHDOG_MS });
-            return { key, sas, cm };
+            const { key, sas, rttMs } = await performKeyExchange(cm, { timeoutMs: P2P_HANDSHAKE_WATCHDOG_MS });
+            return { key, sas, rttMs, cm };
         } catch {
             // The P2P handshake never settled. Fall back to the relay and retry there.
             // (A concurrent 'relay-ready' may already have swapped us — activateRelay is
             // memoized, so we simply await the same relay and use the live channel.)
             console.warn('[useConnection] P2P handshake stalled — falling back to server relay');
             const relayCm = await activateRelayRef.current();
-            const { key, sas } = await performKeyExchange(relayCm);
-            return { key, sas, cm: relayCm };
+            const { key, sas, rttMs } = await performKeyExchange(relayCm);
+            return { key, sas, rttMs, cm: relayCm };
         }
     }, []);
 
@@ -699,8 +720,8 @@ export function useConnection({
         try {
             const cm = await initConnection('sender');
             // Agree an end-to-end session key before any file data is sent.
-            const { key: cryptoKey, sas, cm: activeCm } = await establishSecureChannel(cm);
-            setDiagnostics((prev) => ({ ...prev, encrypted: true }));
+            const { key: cryptoKey, sas, rttMs, cm: activeCm } = await establishSecureChannel(cm);
+            setDiagnostics((prev) => ({ ...prev, encrypted: true, handshakeRttMs: rttMs }));
             // MITM defence: both peers must confirm the SAS matches before any
             // file data leaves this device.
             await waitForSasConfirmation(sas);
@@ -760,6 +781,7 @@ export function useConnection({
                 identity: getLocalIdentity(),
                 transferType: sendOptions.transferType,
                 textFormat: sendOptions.textFormat,
+                rttMs,
             });
             senderRef.current = batchSender;
 
@@ -816,8 +838,8 @@ export function useConnection({
             // Establish the handshake first (this may transparently fall back to the
             // relay if the P2P channel opened but stays silent) so the BatchReceiver is
             // bound to whichever channel actually carries data.
-            const { key, sas, cm: activeCm } = await establishSecureChannel(cm);
-            setDiagnostics((prev) => ({ ...prev, encrypted: true }));
+            const { key, sas, rttMs, cm: activeCm } = await establishSecureChannel(cm);
+            setDiagnostics((prev) => ({ ...prev, encrypted: true, handshakeRttMs: rttMs }));
             // Release the session key only after the user confirms the SAS; the receiver
             // still listens for BATCH_META immediately (nothing decrypts until this
             // resolves, and no file data is requested until approval).
@@ -939,6 +961,7 @@ export function useConnection({
                 {
                     makeStorage: () => new StorageManager({ allowFsApi: false }),
                     makeResume: () => new ResumeManager(),
+                    measuredRttMs: rttMs,
                     // Resolve the destination for this transfer: per-transfer override
                     // first, else the saved default (re-permissioned). Null → ZIP path.
                     getDestination: destinationSupported

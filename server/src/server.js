@@ -26,6 +26,7 @@ import { AccountManager } from './accounts/AccountManager.js';
 import { createOAuthProviders } from './accounts/OAuthProviders.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { ChunkAvailabilityRegistry } from './rooms/ChunkAvailabilityRegistry.js';
+import { countryFromHeaders, isIntercontinental } from './geo/GeoDetect.js';
 import {
     MSG,
     SWARM_MSG,
@@ -522,6 +523,12 @@ async function bootstrap() {
                     metricsCollector.incrementActiveSessions();
                     auditLogger.sessionCreated(ip, sessionId);
 
+                    // Store the creator's country for intercontinental detection when
+                    // the second peer joins. Best-effort: null if no header is present.
+                    // await: the Redis-backed manager persists meta to the session
+                    // record (async); the in-memory manager returns synchronously.
+                    await sessionManager.setMeta?.(sessionId, 'creatorCountry', countryFromHeaders(req));
+
                     sendJson(ws, {
                         type: MSG.SESSION_CREATED,
                         sessionId,
@@ -587,10 +594,22 @@ async function bootstrap() {
                     sendJson(ws, { type: MSG.SESSION_CREATED, sessionId, token });
 
                     // Notify the other peer (possibly on another instance).
+                    // Include an intercontinental hint when both peers' countries are
+                    // known and on different continents. This is an optimization hint
+                    // for ICE candidate filtering — never a security signal.
+                    const creatorCountry = (await sessionManager.getMeta?.(sessionId, 'creatorCountry')) || null;
+                    const joinerCountry = countryFromHeaders(req);
+                    const intercontinentalHint = isIntercontinental(creatorCountry, joinerCountry);
+
                     await sessionManager.sendToOtherPeer(sessionId, peerId, {
                         type: MSG.PEER_JOINED,
                         sessionId,
+                        ...(intercontinentalHint === true && { intercontinental: true }),
                     });
+                    // Also tell the joining peer about the geo hint
+                    if (intercontinentalHint === true) {
+                        sendJson(ws, { type: MSG.GEO_HINT, intercontinental: true });
+                    }
                     break;
                 }
 

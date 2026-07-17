@@ -64,6 +64,7 @@ export class BatchSender {
         this.identity = options.identity || null;
         this.transferType = options.transferType || deriveTransferType(batch);
         this.textFormat = options.textFormat || null;
+        this.rttMs = options.rttMs || 0;
 
         this._active = false;
         this._cancelled = false;
@@ -102,6 +103,12 @@ export class BatchSender {
             senderName: this.identity?.deviceName ?? null,
             senderDeviceType: this.identity?.deviceType ?? null,
             senderPlatform: this.identity?.platform ?? null,
+            // Capability flags for intercontinental optimization:
+            // - supportsUnordered: this peer handles out-of-order chunk delivery
+            //   (Receiver._pendingData reorder buffer). When both peers advertise this,
+            //   secondary connections may use unordered DataChannels, eliminating
+            //   head-of-line blocking on lossy intercontinental links.
+            supportsUnordered: true,
             directories: this.batch.directories,
             files: this.batch.files.map((f) => ({ relativePath: f.relativePath, size: f.size })),
         }));
@@ -204,12 +211,18 @@ export class BatchSender {
                     gate.reject(err);
                 }
             },
-            this.cryptoKey
+            this.cryptoKey,
+            this.rttMs
         );
         this._activeSender = sender;
 
         const meta = sender.getFileMeta();
         const fileId = meta.fileId;
+
+        // FEC only earns its ~1/N parity overhead when a lost chunk costs a real
+        // round-trip — i.e. on cross-region / intercontinental links. Gate on the
+        // handshake RTT so LAN and same-metro transfers never pay for it.
+        const fecEnabled = this.rttMs > 100;
 
         return new Promise((resolve, reject) => {
             this._fileGate = { resolve, reject, fileId };
@@ -227,8 +240,25 @@ export class BatchSender {
                 // range-capable receiver may coalesce pulls. Old receivers ignore it
                 // and use per-chunk CHUNK_REQUEST (which this sender still serves).
                 supportsRangeRequest: true,
+                // Sender-push capability (intercontinental optimization): when both
+                // peers support it, the sender proactively pushes chunks instead of
+                // waiting for per-chunk requests, eliminating one RTT per window.
+                supportsPush: true,
+                // FEC capability (intercontinental optimization): only advertised on
+                // high-RTT paths, where a retransmission round-trip is expensive enough
+                // to justify the ~1/N parity overhead. On low-RTT/LAN links parity is
+                // pure waste, so it stays off and the receiver sets up no decoder.
+                supportsFec: fecEnabled,
             })).then(() => {
                 sender.start();
+                // If the receiver will also support push (it reads supportsPush from
+                // FILE_META), the sender starts the push loop. The receiver will send
+                // PUSH_ACK to advance the window; if it doesn't (old receiver), the
+                // sender's pull handler still serves CHUNK_REQUEST normally.
+                sender.startPush(this.rttMs > 100 ? 128 : 24);
+                // Match the advertised FEC capability: only generate parity when we told
+                // the receiver to expect it, so the two sides stay in lockstep.
+                if (fecEnabled) sender.enableFec();
             }).catch(reject);
         }).finally(() => {
             sender.stop();

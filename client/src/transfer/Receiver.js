@@ -4,6 +4,7 @@ import {
     MAX_IN_FLIGHT_CAP,
     MAX_RETRY_COUNT,
     STALL_TIMEOUT_MS,
+    initialWindowForRtt,
 } from '@shared/constants.js';
 import { chunksToRanges } from '@shared/chunkRanges.js';
 import { ChunkManager } from './ChunkManager.js';
@@ -11,6 +12,7 @@ import { IntegrityVerifier } from './IntegrityVerifier.js';
 import { FileManifest } from './FileManifest.js';
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
 import { maybeDecompress } from './Compression.js';
+import { FECDecoder, FEC_MAX_GROUP, isFecParityIndex, fecGroupFromIndex } from './FECEngine.js';
 
 /**
  * Receiver — Receiver-driven pull model for parallel chunk download.
@@ -36,6 +38,9 @@ export class Receiver {
      * @param {CryptoKey} [cryptoKey] - AES-256-GCM session key. Must match the
      *        sender's; when present, every received chunk is decrypted before
      *        integrity verification and storage.
+     * @param {number} [measuredRttMs=0] - handshake-measured RTT in ms. Used to
+     *        pick an initial pull-window that fills the bandwidth-delay product
+     *        from the first request burst (see initialWindowForRtt).
      */
     constructor(
         fileMeta,
@@ -46,7 +51,8 @@ export class Receiver {
         onComplete,
         onError,
         onStalled = null,
-        cryptoKey = null
+        cryptoKey = null,
+        measuredRttMs = 0
     ) {
         this.cryptoKey = cryptoKey;
         this.fileMeta = fileMeta;
@@ -70,11 +76,12 @@ export class Receiver {
         this.inFlight = new Set();
         /** @type {Map<number, number>} chunk index → request timestamp (for RTT) */
         this._requestedAt = new Map();
-        // Adaptive pull window (bandwidth-delay product). Starts at the fixed
-        // MAX_IN_FLIGHT floor and grows toward measured BDP on long fat pipes —
-        // a fixed 24×256 KB window caps a 200 ms path at ~30 MB/s of *theoretical*
-        // ceiling but strangles multi-connection striping and higher-RTT relays.
-        this._window = MAX_IN_FLIGHT;
+        // Adaptive pull window (bandwidth-delay product). When a handshake RTT is
+        // known, start at a larger window sized to the estimated BDP band —
+        // intercontinental paths (>200ms) start at 128 instead of 24, filling the
+        // pipe from the first burst instead of spending dozens of round-trips growing.
+        // The adaptive _updateWindow() below still shrinks on loss / grows on capacity.
+        this._window = initialWindowForRtt(measuredRttMs);
         /** @type {number|null} EWMA of request→arrival latency in ms */
         this._rttEwma = null;
         /** @type {Map<number, number>} chunk index → retry count */
@@ -101,6 +108,33 @@ export class Receiver {
         this._awaitingManifest = false;
         this._manifestTimer = null;
 
+        // Push mode: when the sender advertises supportsPush, the receiver stops
+        // sending CHUNK_REQUEST and instead sends lightweight PUSH_ACK with the
+        // highest contiguous chunk index received. The sender pushes proactively.
+        this._pushMode = !!(fileMeta.supportsPush);
+        /** Highest chunk index received without a gap from 0 */
+        this._highestContiguous = -1;
+        /** Counter to batch PUSH_ACK sends (every N chunks) */
+        this._pushAckCounter = 0;
+        /** How often to send PUSH_ACK (every N chunks received) */
+        this._pushAckInterval = Math.max(1, Math.floor(this._window / 4));
+
+        // FEC: when the sender advertises supportsFec (high-RTT paths only), it emits
+        // XOR parity for each group of N chunks. When exactly one chunk in a group is
+        // lost, we reconstruct it from parity ⊕ received without waiting a retransmit
+        // round-trip. Every reconstruction is still verified by the per-chunk hash +
+        // GCM tag in _handleChunkData before it is written, so a bad recovery can never
+        // corrupt the file — it just falls through to normal retransmission.
+        this._fecEnabled = !!(fileMeta.supportsFec);
+        /** @type {FECDecoder|null} */
+        this._fecDecoder = this._fecEnabled ? new FECDecoder() : null;
+        /** @type {Map<number, ArrayBuffer>} index → ciphertext, retained for reconstruction */
+        this._fecCiphertext = new Map();
+        /** @type {Map<number, {groupStart:number,groupSize:number,chunkLengths:number[]}>} groupId → parity meta awaiting its binary frame */
+        this._pendingParity = new Map();
+        /** Count of chunks recovered via FEC (diagnostics: FEC-recovery %). */
+        this._fecRecovered = 0;
+
         // Loss accounting for the diagnostics readout. Every chunk we ask for counts
         // as a request; chunks the stall timer has to ask for again are our observable
         // loss signal (the sender's copy never arrived within STALL_TIMEOUT_MS).
@@ -121,6 +155,8 @@ export class Receiver {
             requests,
             retransmits: this._retransmits,
             lossRate: requests > 0 ? this._retransmits / requests : 0,
+            // Chunks recovered from FEC parity without a retransmission round-trip.
+            fecRecovered: this._fecRecovered,
         };
     }
 
@@ -173,9 +209,29 @@ export class Receiver {
                         this._requestNextChunks();
                     } else if (msg.type === TRANSFER_MSG.MANIFEST) {
                         await this._verifyManifestAndFinalize(msg.rootHash);
+                    } else if (msg.type === TRANSFER_MSG.FEC_PARITY) {
+                        // Parity metadata; the binary parity frame follows (negative
+                        // synthetic index). Stash the group descriptor until it lands.
+                        if (this._fecEnabled) {
+                            this._pendingParity.set(msg.groupId, {
+                                groupStart: msg.groupStart,
+                                groupSize: msg.groupSize,
+                                chunkLengths: msg.chunkLengths,
+                            });
+                        }
                     }
                 } else if (rawData instanceof ArrayBuffer) {
                     const { index, data } = ChunkManager.unpackChunk(rawData);
+                    // High synthetic index = FEC parity frame (the header index is
+                    // unsigned, so parity is namespaced into the top of the u32 range).
+                    // Route it to the decoder; never treat it as a data chunk.
+                    if (isFecParityIndex(index)) {
+                        if (this._fecEnabled) this._fecHandleParity(fecGroupFromIndex(index), data);
+                        return; // stray parity on a non-FEC transfer is simply ignored
+                    }
+                    // Retain the ciphertext so FEC can reconstruct a sibling in this
+                    // chunk's group if one is lost (bounded cache; no-op when FEC off).
+                    this._fecRegisterChunk(index, data);
                     if (this._pendingMeta.has(index)) {
                         await this._handleChunkData(index, data);
                     } else {
@@ -191,8 +247,11 @@ export class Receiver {
         // Start stall detection
         this._startStallTimer();
 
-        // Begin requesting chunks
-        this._requestNextChunks();
+        // Begin requesting chunks (pull mode) or wait for push (push mode).
+        // In push mode, the sender proactively sends — we just need to ACK.
+        if (!this._pushMode) {
+            this._requestNextChunks();
+        }
     }
 
     /**
@@ -202,6 +261,10 @@ export class Receiver {
         this._active = false;
         this._clearStallTimer();
         if (this._manifestTimer) { clearInterval(this._manifestTimer); this._manifestTimer = null; }
+        // Release FEC buffers (ciphertext cache + open groups) held for reconstruction.
+        this._fecCiphertext.clear();
+        this._pendingParity.clear();
+        this._fecDecoder?.clear();
     }
 
     /**
@@ -388,7 +451,121 @@ export class Receiver {
 
         // Request more chunks if not paused
         if (!this._paused) {
-            this._requestNextChunks();
+            if (this._pushMode) {
+                this._maybeSendPushAck();
+            } else {
+                this._requestNextChunks();
+            }
+        }
+    }
+
+    /**
+     * Compute the highest contiguous chunk index received from 0.
+     * Used for PUSH_ACK so the sender knows how far to advance.
+     * @returns {number} -1 if no chunks received yet
+     */
+    _computeHighestContiguous() {
+        for (let i = this._highestContiguous + 1; i < this.totalChunks; i++) {
+            if (!this.resumeManager.hasChunk(this.fileMeta.fileId, i)) {
+                return i - 1;
+            }
+        }
+        return this.totalChunks - 1;
+    }
+
+    /**
+     * Send a PUSH_ACK to the sender every N chunks received, batching ACKs
+     * to avoid per-chunk control message overhead.
+     */
+    _maybeSendPushAck() {
+        this._pushAckCounter++;
+        if (this._pushAckCounter >= this._pushAckInterval) {
+            this._pushAckCounter = 0;
+            this._highestContiguous = this._computeHighestContiguous();
+            const msg = JSON.stringify({
+                type: TRANSFER_MSG.PUSH_ACK,
+                highestContiguous: this._highestContiguous,
+            });
+            this.channelManager.sendAny(msg).catch(() => { /* sender may be gone */ });
+        }
+    }
+
+    // ── Forward Error Correction ───────────────────────────────
+
+    /**
+     * Retain a chunk's ciphertext for possible FEC reconstruction and, if its group's
+     * parity has already arrived, register it and try to recover a lost sibling.
+     * Bounded LRU-ish cache so a long transfer never grows memory without limit.
+     * No-op when FEC is not negotiated.
+     * @param {number} index
+     * @param {ArrayBuffer} ciphertext
+     */
+    _fecRegisterChunk(index, ciphertext) {
+        if (!this._fecEnabled || !this._fecDecoder) return;
+        this._fecCiphertext.set(index, ciphertext);
+
+        const groupId = this._fecDecoder.groupIdForIndex(index);
+        if (groupId !== null) {
+            this._fecDecoder.addChunk(index, ciphertext, groupId);
+            this._tryFecReconstruct(groupId);
+        }
+
+        // Cap the cache: parity arrives right after its group, so only a couple of
+        // groups' worth of ciphertext is ever needed. Evict the lowest index first.
+        while (this._fecCiphertext.size > FEC_MAX_GROUP * 2) {
+            let oldest = Infinity;
+            for (const k of this._fecCiphertext.keys()) if (k < oldest) oldest = k;
+            this._fecCiphertext.delete(oldest);
+        }
+    }
+
+    /**
+     * Handle a parity binary frame: register it with the decoder, feed any cached
+     * ciphertext for the group, and attempt reconstruction.
+     * @param {number} groupId
+     * @param {ArrayBuffer} parityData
+     */
+    _fecHandleParity(groupId, parityData) {
+        if (!this._fecDecoder) return;
+        const meta = this._pendingParity.get(groupId);
+        if (!meta) return; // parity binary without its JSON descriptor — drop
+        this._pendingParity.delete(groupId);
+
+        this._fecDecoder.addParity(groupId, meta.groupStart, meta.groupSize, parityData, meta.chunkLengths);
+        // Pull any already-received ciphertext for this group's range into the decoder.
+        for (let i = meta.groupStart; i < meta.groupStart + meta.groupSize; i++) {
+            const cached = this._fecCiphertext.get(i);
+            if (cached !== undefined) this._fecDecoder.addChunk(i, cached, groupId);
+        }
+        this._tryFecReconstruct(groupId);
+    }
+
+    /**
+     * Attempt to reconstruct the single missing chunk of a group. A recovered chunk is
+     * fed through the normal _handleChunkData path, which decrypts, decompresses and
+     * verifies it against the sender's committed hash before writing — so a wrong
+     * reconstruction is rejected there and falls back to retransmission. Only useful
+     * when the chunk is still missing AND its metadata (hash) has already arrived.
+     * @param {number} groupId
+     */
+    _tryFecReconstruct(groupId) {
+        if (!this._fecEnabled || !this._fecDecoder || !this._active || this._finalized) return;
+
+        const recovered = this._fecDecoder.tryReconstruct(groupId);
+        if (recovered) {
+            const { chunkIndex, data } = recovered;
+            if (!this.resumeManager.hasChunk(this.fileMeta.fileId, chunkIndex)
+                && this._pendingMeta.has(chunkIndex)) {
+                this._fecRecovered++;
+                // _handleChunkData is async; fire-and-forget with error containment.
+                this._handleChunkData(chunkIndex, data).catch(() => { /* verify failed → retransmit */ });
+            }
+        }
+
+        // A group is finished once every chunk has arrived or the one gap was filled.
+        // Drop it so memory is released and stale groups don't accumulate.
+        if (recovered || this._fecDecoder.isGroupComplete(groupId)) {
+            this._fecDecoder.removeGroup(groupId);
         }
     }
 
@@ -597,25 +774,49 @@ export class Receiver {
 
     _checkForStall() {
         if (!this._active || this._paused || this._finalized) return;
-        if (this.inFlight.size === 0) return; // nothing in-flight — normal
 
         const timeSinceLastChunk = Date.now() - (this._lastChunkTime || Date.now());
-        if (timeSinceLastChunk > STALL_TIMEOUT_MS) {
+        if (timeSinceLastChunk <= STALL_TIMEOUT_MS) return;
+
+        if (this._pushMode) {
+            // Push mode stall: the sender stopped pushing (lost ACK, or chunks
+            // dropped). Re-request all missing chunks via explicit CHUNK_REQUEST
+            // to recover. Also send a fresh PUSH_ACK to wake the sender's push loop.
+            const missing = this.getMissingChunks();
+            if (missing.length === 0) return;
+
+            console.warn(`[Receiver] Push stall detected — re-requesting ${missing.length} missing chunks`);
+            this._retransmits += missing.length;
+            // Request up to window-size missing chunks via the pull path
+            const toRequest = missing.slice(0, this._window);
+            if (this._supportsRange) {
+                this._requestChunkRange(toRequest);
+            } else {
+                for (const idx of toRequest) this._requestChunk(idx);
+            }
+            // Also send a PUSH_ACK to unstick the sender's push loop
+            this._highestContiguous = this._computeHighestContiguous();
+            this.channelManager.sendAny(JSON.stringify({
+                type: TRANSFER_MSG.PUSH_ACK,
+                highestContiguous: this._highestContiguous,
+            })).catch(() => {});
+        } else {
+            // Pull mode stall: re-request all in-flight chunks
+            if (this.inFlight.size === 0) return;
             console.warn('[Receiver] Transfer stalled — re-requesting in-flight chunks');
 
-            // Re-request all in-flight chunks
             const stalledChunks = Array.from(this.inFlight);
             this._retransmits += stalledChunks.length;
             this.inFlight.clear();
             for (const idx of stalledChunks) {
                 this._requestChunk(idx);
             }
+        }
 
-            this._lastChunkTime = Date.now();
+        this._lastChunkTime = Date.now();
 
-            if (this.onStalled) {
-                this.onStalled();
-            }
+        if (this.onStalled) {
+            this.onStalled();
         }
     }
 }

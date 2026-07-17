@@ -292,6 +292,9 @@ export class SignalingClient {
             case MSG.PEER_JOINED:
                 this._emit('peer-joined', data);
                 break;
+            case MSG.GEO_HINT:
+                this._emit('geo-hint', data);
+                break;
             case MSG.OFFER:
                 // N-peer room signaling carries `from`; 2-peer session signaling does not.
                 // Forward the iceRestart flag so the receiver refreshes ICE on the existing

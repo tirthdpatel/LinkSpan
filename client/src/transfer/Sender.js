@@ -2,6 +2,8 @@ import { ChunkManager } from './ChunkManager.js';
 import { IntegrityVerifier } from './IntegrityVerifier.js';
 import { FileManifest } from './FileManifest.js';
 import { CryptoEngine } from '../crypto/CryptoEngine.js';
+import { HashWorkerPool } from '../crypto/HashWorkerPool.js';
+import { FECEncoder, adaptiveGroupSize, FEC_DEFAULT_GROUP, fecParityIndex } from './FECEngine.js';
 import { maybeCompress, isFileCompressible } from './Compression.js';
 import {
     TRANSFER_MSG,
@@ -32,12 +34,15 @@ export class Sender {
      * @param {CryptoKey} [cryptoKey] - AES-256-GCM session key. When present, every
      *        chunk is encrypted before it leaves this peer, so neither a relay nor
      *        any intermediary can read file contents.
+     * @param {number} [rttMs=0] - handshake-measured RTT in ms. Passed through to
+     *        pickChunkSize so high-RTT paths use max chunk size for medium files.
      */
-    constructor(file, channelManager, onProgress, onCancel = null, onError = null, cryptoKey = null) {
+    constructor(file, channelManager, onProgress, onCancel = null, onError = null, cryptoKey = null, rttMs = 0) {
         this.cryptoKey = cryptoKey;
-        // Dynamic chunk size (Phase 4.3): scaled to the file, capped so the framed
-        // ciphertext (header + IV + tag) stays within the 256 KB DataChannel limit.
-        this.chunkManager = new ChunkManager(file, pickChunkSize(file.size, !!cryptoKey));
+        // Dynamic chunk size (Phase 4.3): scaled to the file and RTT, capped so the
+        // framed ciphertext (header + IV + tag) stays within the 256 KB DataChannel
+        // limit. On high-RTT paths, medium files use max chunks to reduce round-trips.
+        this.chunkManager = new ChunkManager(file, pickChunkSize(file.size, !!cryptoKey, rttMs));
         // Decide once per file whether compression can help. Already-compressed media
         // (video/audio/images/archives) skip deflate entirely — attempting it on every
         // chunk of a large H.264 video is pure wasted CPU that never shrinks the data.
@@ -47,6 +52,11 @@ export class Sender {
         this.onCancel = onCancel;
         this.onError = onError;
         this.verifier = new IntegrityVerifier();
+        // Off-main-thread SHA-256 hashing: spawns 1–2 Web Workers so the main
+        // thread event loop stays responsive during high-concurrency chunk serving.
+        // Falls back to main-thread crypto.subtle if workers can't be created.
+        this._hashPool = new HashWorkerPool(2);
+        this.verifier.setWorkerPool(this._hashPool);
 
         this._sentChunks = 0;
         // On a resumed transfer the receiver already holds some chunks and reports
@@ -64,11 +74,39 @@ export class Sender {
         /** @type {Map<number, number>} chunk index → retry count */
         this._retryCount = new Map();
 
+        // ── Push mode state (intercontinental optimization) ──────────────
+        // When the receiver advertises supportsPush, the sender proactively pushes
+        // chunks instead of waiting for per-chunk requests. This eliminates one
+        // RTT per window of data.
+        this._pushMode = false;
+        /** Next chunk index to push (advances on PUSH_ACK) */
+        this._pushCursor = 0;
+        /** Push window size (set from receiver's initial window / PUSH_ACK) */
+        this._pushWindow = 0;
+        /** Resolves when a PUSH_ACK arrives or push mode should advance */
+        this._pushWake = null;
+
         // Loss accounting for the diagnostics readout. A request for an index we
         // already delivered means the receiver never got it (its stall timer
         // re-requested) — that duplicate is our observable loss signal.
         this._chunkSends = 0;   // total successful chunk deliveries (incl. retransmits)
         this._retransmits = 0;  // deliveries that re-sent an already-delivered index
+
+        // FEC encoder: emits XOR parity every N chunks so the receiver can
+        // reconstruct a single lost chunk without a retransmission round-trip.
+        // Disabled by default — parity is pure wire overhead unless the receiver can
+        // decode it, so it is only produced once FEC is negotiated (enableFec, driven
+        // by the receiver advertising supportsFec in FILE_META). See FECEngine.js.
+        this._fecEncoder = new FECEncoder(FEC_DEFAULT_GROUP);
+        this._fecEnabled = false;
+    }
+
+    /**
+     * Turn FEC parity generation on. Called by BatchSender when the peer negotiated
+     * FEC support. Until this is called the sender emits no parity frames.
+     */
+    enableFec() {
+        this._fecEnabled = true;
     }
 
     // ── Public API ─────────────────────────────────────────────
@@ -169,6 +207,22 @@ export class Sender {
                         break;
                     }
 
+                    case TRANSFER_MSG.PUSH_ACK: {
+                        // Receiver confirmed receipt up to highestContiguous — advance
+                        // the push window so the push loop sends the next batch.
+                        const hc = Number(msg.highestContiguous);
+                        if (Number.isFinite(hc) && hc >= 0) {
+                            // Advance cursor: next push starts after highest confirmed
+                            this._pushCursor = Math.max(this._pushCursor, hc + 1);
+                            // Wake the push loop if it's sleeping
+                            if (this._pushWake) {
+                                this._pushWake();
+                                this._pushWake = null;
+                            }
+                        }
+                        break;
+                    }
+
                     default:
                         break;
                 }
@@ -179,10 +233,74 @@ export class Sender {
     }
 
     /**
+     * Enable push mode and start the proactive push loop. Called by BatchSender
+     * when the receiver advertises supportsPush in FILE_META/BATCH_META.
+     * @param {number} window - initial push window (from receiver's initial window)
+     */
+    startPush(window) {
+        this._pushMode = true;
+        this._pushCursor = 0;
+        this._pushWindow = Math.max(window, 24);
+        this._runPushLoop();
+    }
+
+    /**
+     * Push loop: proactively sends chunks [cursor, cursor+window) without waiting
+     * for per-chunk requests. When the window is exhausted, sleeps until a PUSH_ACK
+     * advances the cursor. Retransmission requests (CHUNK_REQUEST) are handled by
+     * the message handler above, independently of this loop.
+     */
+    async _runPushLoop() {
+        const total = this.chunkManager.totalChunks;
+
+        while (this._active && !this._paused && this._pushCursor < total) {
+            // Push up to window-size chunks
+            const windowEnd = Math.min(this._pushCursor + this._pushWindow, total);
+            const indices = [];
+            for (let i = this._pushCursor; i < windowEnd; i++) {
+                indices.push(i);
+            }
+
+            if (indices.length === 0) break;
+
+            // Serve with bounded concurrency (reuse the same pattern as range requests)
+            let cursor = 0;
+            const worker = async () => {
+                while (this._active && !this._paused) {
+                    const ci = cursor++;
+                    if (ci >= indices.length) return;
+                    await this._handleChunkRequest(indices[ci]);
+                }
+            };
+            const workers = [];
+            for (let w = 0; w < Math.min(SENDER_CONCURRENCY, indices.length); w++) {
+                workers.push(worker());
+            }
+            await Promise.all(workers);
+
+            if (!this._active || this._paused) break;
+
+            // If we've sent everything, we're done
+            if (windowEnd >= total) break;
+
+            // Wait for a PUSH_ACK to advance the cursor before pushing more.
+            // The receiver sends PUSH_ACK periodically with { highestContiguous },
+            // which the message handler above uses to advance _pushCursor.
+            if (this._pushCursor < windowEnd) {
+                // Cursor hasn't advanced yet — sleep until PUSH_ACK wakes us
+                await new Promise((resolve) => {
+                    this._pushWake = resolve;
+                });
+            }
+        }
+    }
+
+    /**
      * Stop the sender.
      */
     stop() {
         this._active = false;
+        this._hashPool?.terminate();
     }
 
     // ── Private ────────────────────────────────────────────────
@@ -365,6 +483,21 @@ export class Sender {
                 );
                 this.onProgress(reported, this.chunkManager.totalChunks, speed);
             }
+
+            // FEC: feed the payload (ciphertext) to the encoder. When a group
+            // completes, emit the parity so the receiver can reconstruct a single
+            // lost chunk without a retransmission round-trip.
+            if (this._fecEnabled && !isRetransmit) {
+                // Adapt group size based on observed loss rate
+                const lossRate = this._chunkSends > 20
+                    ? this._retransmits / this._chunkSends : 0;
+                this._fecEncoder.setGroupSize(adaptiveGroupSize(lossRate));
+
+                const parity = this._fecEncoder.addChunk(index, payload);
+                if (parity) {
+                    await this._sendFecParity(parity);
+                }
+            }
         } catch (err) {
             console.error(`[Sender] Failed to send chunk ${index}:`, err.message);
             this._retryCount.set(index, retries + 1);
@@ -404,5 +537,35 @@ export class Sender {
         }
 
         return best;
+    }
+
+    /**
+     * Send FEC parity data for a completed group.
+     * @param {{ groupId: number, groupStart: number, groupSize: number, parityData: ArrayBuffer }} parity
+     */
+    async _sendFecParity(parity) {
+        if (!this._active) return;
+        try {
+            const meta = JSON.stringify({
+                type: TRANSFER_MSG.FEC_PARITY,
+                groupId: parity.groupId,
+                groupStart: parity.groupStart,
+                groupSize: parity.groupSize,
+                paritySize: parity.parityData.byteLength,
+                // Exact ciphertext length of each chunk in the group — lets the receiver
+                // trim a reconstructed (zero-padded) chunk before GCM decryption.
+                chunkLengths: parity.chunkLengths,
+            });
+            await this.channelManager.sendAny(meta);
+            // Send the binary parity data reusing ChunkManager's chunk framing, under a
+            // high synthetic index (top of the u32 range) so the receiver can tell parity
+            // frames from data chunks — the header index is unsigned, so a plain negative
+            // value would wrap into the valid chunk-index range. See FECEngine.
+            const packed = ChunkManager.packChunk(fecParityIndex(parity.groupId), parity.parityData);
+            await this.channelManager.sendAny(packed);
+        } catch {
+            // FEC is best-effort — a failure to send parity is not fatal.
+            // The receiver falls back to retransmission for lost chunks.
+        }
     }
 }

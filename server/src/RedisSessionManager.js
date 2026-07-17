@@ -272,6 +272,41 @@ export class RedisSessionManager {
         return true;
     }
 
+    // ── Session Metadata ───────────────────────────────────────
+
+    /**
+     * Store arbitrary per-session metadata (e.g. creator country for geo detection)
+     * on the session object in Redis, so it is visible to the peer's instance even
+     * when the two peers land on different server instances. Best-effort: a missing
+     * session (expired) is a no-op. Mirrors SessionManager.setMeta but async.
+     * @param {string} sessionId
+     * @param {string} key
+     * @param {*} value
+     * @returns {Promise<void>}
+     */
+    async setMeta(sessionId, key, value) {
+        const raw = await this._client.get(`session:${sessionId}`);
+        if (!raw) return;
+        const session = JSON.parse(raw);
+        if (!session._meta) session._meta = {};
+        session._meta[key] = value;
+        const ttlSeconds = Math.ceil(SESSION_TIMEOUT_MS / 1000);
+        await this._client.set(`session:${sessionId}`, JSON.stringify(session), { EX: ttlSeconds });
+    }
+
+    /**
+     * Retrieve per-session metadata. Mirrors SessionManager.getMeta but async.
+     * @param {string} sessionId
+     * @param {string} key
+     * @returns {Promise<*>} value or null
+     */
+    async getMeta(sessionId, key) {
+        const raw = await this._client.get(`session:${sessionId}`);
+        if (!raw) return null;
+        const session = JSON.parse(raw);
+        return session._meta?.[key] ?? null;
+    }
+
     /**
      * Remove a peer from a session.
      * @param {string} sessionId
