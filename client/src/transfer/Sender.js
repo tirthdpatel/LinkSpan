@@ -84,6 +84,9 @@ export class Sender {
         /** Next never-pushed chunk index. Only moves forward, so a chunk is pushed once;
          *  lost chunks come back through the receiver's CHUNK_REQUEST stall recovery. */
         this._pushNext = 0;
+        /** Chunks the receiver reports as arrived in any order (PUSH_ACK `received`).
+         *  Stays 0 for receivers that don't report it, which falls back to _pushCursor. */
+        this._pushArrived = 0;
         /** Push window size (set from receiver's initial window / PUSH_ACK) */
         this._pushWindow = 0;
         /** Resolves when a PUSH_ACK arrives or push mode should advance */
@@ -214,14 +217,18 @@ export class Sender {
                         // Receiver confirmed receipt up to highestContiguous — advance
                         // the push window so the push loop sends the next batch.
                         const hc = Number(msg.highestContiguous);
+                        const received = Number(msg.received);
                         if (Number.isFinite(hc) && hc >= 0) {
                             // Advance cursor: next push starts after highest confirmed
                             this._pushCursor = Math.max(this._pushCursor, hc + 1);
-                            // Wake the push loop if it's sleeping
-                            if (this._pushWake) {
-                                this._pushWake();
-                                this._pushWake = null;
-                            }
+                        }
+                        if (Number.isFinite(received) && received > 0) {
+                            this._pushArrived = Math.max(this._pushArrived, received);
+                        }
+                        // Wake the push loop if it's sleeping
+                        if (this._pushWake) {
+                            this._pushWake();
+                            this._pushWake = null;
                         }
                         break;
                     }
@@ -244,6 +251,7 @@ export class Sender {
         this._pushMode = true;
         this._pushCursor = 0;
         this._pushNext = 0;
+        this._pushArrived = 0;
         this._pushWindow = Math.max(window, 24);
         this._runPushLoop();
     }
@@ -257,12 +265,17 @@ export class Sender {
      * Each pass starts at _pushNext, not _pushCursor: ACKs lag the pushes (the
      * receiver ACKs every window/4 chunks and the ACK is itself in flight), so
      * restarting at the cursor would re-push chunks that are still on the wire.
+     *
+     * The window bounds chunks in flight (pushed minus arrived), not distance past
+     * the contiguous prefix: chunks are striped over several peer connections, and
+     * one chunk stuck on a slow connection would otherwise idle all the others.
      */
     async _runPushLoop() {
         const total = this.chunkManager.totalChunks;
 
         while (this._active && !this._paused && this._pushNext < total) {
-            const windowEnd = Math.min(this._pushCursor + this._pushWindow, total);
+            const base = Math.max(this._pushCursor, this._pushArrived);
+            const windowEnd = Math.min(base + this._pushWindow, total);
 
             if (this._pushNext >= windowEnd) {
                 // Window full of unconfirmed chunks — sleep until PUSH_ACK wakes us

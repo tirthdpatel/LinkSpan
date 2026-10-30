@@ -249,8 +249,8 @@ describe('Sender push mode', () => {
                 if (msg.type === TRANSFER_MSG.CHUNK_DATA) this.pushed.push(msg.index);
             },
             async sendAny(data) { await this.send(0, data); return 0; },
-            ack(highestContiguous) {
-                return this._onMessage(JSON.stringify({ type: TRANSFER_MSG.PUSH_ACK, highestContiguous }), 0);
+            ack(highestContiguous, received) {
+                return this._onMessage(JSON.stringify({ type: TRANSFER_MSG.PUSH_ACK, highestContiguous, received }), 0);
             },
             getChannelStats() { return [{ index: 0, state: 'open', bufferedAmount: 0, throughput: 0 }]; },
         };
@@ -279,6 +279,27 @@ describe('Sender push mode', () => {
 
         expect([...ep.pushed].sort((a, b) => a - b)).toEqual([...Array(total).keys()]);
         expect(sender.getLossStats().retransmits).toBe(0);
+        sender.stop();
+    });
+
+    test('a chunk stuck on a slow connection does not stall the other channels', async () => {
+        const file = new File([randomBytes(50 * 256 * 1024)], 'p.bin');
+        const ep = makeSenderEndpoint();
+        const sender = new Sender(file, ep, () => {}, null, () => {}, null);
+        const total = sender.chunkManager.totalChunks;
+        expect(total).toBeGreaterThan(44);
+
+        sender.start();
+        sender.startPush(24);
+        await waitFor(() => ep.pushed.length === 24);
+
+        // Chunk 1 is still in flight on a slow connection, so the contiguous prefix is
+        // only 0 — but 20 of the 24 pushed chunks have arrived. The sender should keep
+        // 24 in flight (push 20 more), not stop at index 0 + 24.
+        await ep.ack(0, 20);
+        await waitFor(() => ep.pushed.length === 44);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(ep.pushed).toHaveLength(44);
         sender.stop();
     });
 });

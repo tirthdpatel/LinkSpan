@@ -114,6 +114,11 @@ export class Receiver {
         this._pushMode = !!(fileMeta.supportsPush);
         /** Highest chunk index received without a gap from 0 */
         this._highestContiguous = -1;
+        /** Chunks that arrived this session, in any order (duplicates included). Sent in
+         *  PUSH_ACK so the sender can bound chunks in flight rather than distance from
+         *  the contiguous prefix — one chunk stuck on a slow connection must not idle
+         *  every other channel. */
+        this._arrivals = 0;
         /** Counter to batch PUSH_ACK sends (every N chunks) */
         this._pushAckCounter = 0;
         /** How often to send PUSH_ACK (every N chunks received) */
@@ -363,6 +368,7 @@ export class Receiver {
             this._requestChunk(index);
             return;
         }
+        this._arrivals++;
 
         // Duplicate chunk guard (ResumeManager is the source of truth)
         if (this.resumeManager.hasChunk(this.fileMeta.fileId, index)) {
@@ -485,6 +491,7 @@ export class Receiver {
             const msg = JSON.stringify({
                 type: TRANSFER_MSG.PUSH_ACK,
                 highestContiguous: this._highestContiguous,
+                received: this._arrivals,
             });
             this.channelManager.sendAny(msg).catch(() => { /* sender may be gone */ });
         }
@@ -799,6 +806,7 @@ export class Receiver {
             this.channelManager.sendAny(JSON.stringify({
                 type: TRANSFER_MSG.PUSH_ACK,
                 highestContiguous: this._highestContiguous,
+                received: this._arrivals,
             })).catch(() => {});
         } else {
             // Pull mode stall: re-request all in-flight chunks
