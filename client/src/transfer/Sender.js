@@ -79,8 +79,11 @@ export class Sender {
         // chunks instead of waiting for per-chunk requests. This eliminates one
         // RTT per window of data.
         this._pushMode = false;
-        /** Next chunk index to push (advances on PUSH_ACK) */
+        /** Receiver's confirmed base: chunks below this index arrived (advances on PUSH_ACK) */
         this._pushCursor = 0;
+        /** Next never-pushed chunk index. Only moves forward, so a chunk is pushed once;
+         *  lost chunks come back through the receiver's CHUNK_REQUEST stall recovery. */
+        this._pushNext = 0;
         /** Push window size (set from receiver's initial window / PUSH_ACK) */
         this._pushWindow = 0;
         /** Resolves when a PUSH_ACK arrives or push mode should advance */
@@ -240,28 +243,40 @@ export class Sender {
     startPush(window) {
         this._pushMode = true;
         this._pushCursor = 0;
+        this._pushNext = 0;
         this._pushWindow = Math.max(window, 24);
         this._runPushLoop();
     }
 
     /**
-     * Push loop: proactively sends chunks [cursor, cursor+window) without waiting
-     * for per-chunk requests. When the window is exhausted, sleeps until a PUSH_ACK
+     * Push loop: proactively sends chunks up to cursor+window without waiting for
+     * per-chunk requests. When the window is exhausted, sleeps until a PUSH_ACK
      * advances the cursor. Retransmission requests (CHUNK_REQUEST) are handled by
      * the message handler above, independently of this loop.
+     *
+     * Each pass starts at _pushNext, not _pushCursor: ACKs lag the pushes (the
+     * receiver ACKs every window/4 chunks and the ACK is itself in flight), so
+     * restarting at the cursor would re-push chunks that are still on the wire.
      */
     async _runPushLoop() {
         const total = this.chunkManager.totalChunks;
 
-        while (this._active && !this._paused && this._pushCursor < total) {
-            // Push up to window-size chunks
+        while (this._active && !this._paused && this._pushNext < total) {
             const windowEnd = Math.min(this._pushCursor + this._pushWindow, total);
-            const indices = [];
-            for (let i = this._pushCursor; i < windowEnd; i++) {
-                indices.push(i);
+
+            if (this._pushNext >= windowEnd) {
+                // Window full of unconfirmed chunks — sleep until PUSH_ACK wakes us
+                await new Promise((resolve) => {
+                    this._pushWake = resolve;
+                });
+                continue;
             }
 
-            if (indices.length === 0) break;
+            const indices = [];
+            for (let i = this._pushNext; i < windowEnd; i++) {
+                indices.push(i);
+            }
+            this._pushNext = windowEnd;
 
             // Serve with bounded concurrency (reuse the same pattern as range requests)
             let cursor = 0;
@@ -277,21 +292,6 @@ export class Sender {
                 workers.push(worker());
             }
             await Promise.all(workers);
-
-            if (!this._active || this._paused) break;
-
-            // If we've sent everything, we're done
-            if (windowEnd >= total) break;
-
-            // Wait for a PUSH_ACK to advance the cursor before pushing more.
-            // The receiver sends PUSH_ACK periodically with { highestContiguous },
-            // which the message handler above uses to advance _pushCursor.
-            if (this._pushCursor < windowEnd) {
-                // Cursor hasn't advanced yet — sleep until PUSH_ACK wakes us
-                await new Promise((resolve) => {
-                    this._pushWake = resolve;
-                });
-            }
         }
     }
 

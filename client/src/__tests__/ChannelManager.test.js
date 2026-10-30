@@ -80,3 +80,16 @@ describe('ChannelManager.addChannels', () => {
         expect(cm.stats).toHaveLength(1);
     });
 });
+
+describe('ChannelManager throughput stats', () => {
+    test('counts bytes sent, not only bytes received', async () => {
+        const cm = new ChannelManager();
+        cm.setChannels([makeFakeChannel(), makeFakeChannel()]);
+
+        await cm.send(1, new ArrayBuffer(1000));
+        await cm.send(1, 'abcd');
+
+        expect(cm.stats[0].bytes).toBe(0);
+        expect(cm.stats[1].bytes).toBe(1004);
+    });
+});
