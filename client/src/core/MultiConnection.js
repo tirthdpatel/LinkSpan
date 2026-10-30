@@ -35,9 +35,9 @@ export class MultiConnection {
         this._signaling = signaling;
         this._channelManager = channelManager;
         this._iceServers = iceServers;
-        // When both peers negotiate supportsUnordered, secondary connections use
-        // unordered channels to eliminate head-of-line blocking. Defaults to
-        // undefined (PeerConnection.createChannels uses ordered CHANNEL_CONFIG).
+        // Secondary connections carry only chunks and order-insensitive control
+        // frames, so useConnection passes UNORDERED_CHANNEL_CONFIG to eliminate
+        // head-of-line blocking. Undefined falls back to ordered CHANNEL_CONFIG.
         this._channelConfig = channelConfig;
         // Intercontinental geo hint (set via setIntercontinental once the server's
         // GEO_HINT lands). Propagated to every secondary PeerConnection so their ICE

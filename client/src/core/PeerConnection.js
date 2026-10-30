@@ -133,14 +133,15 @@ export class PeerConnection {
      * @param {Function} onChannelReady - called with (channel, index) when each channel opens
      * @param {number} [count] - channels to create (default MAX_CHANNELS; secondary
      *        peer connections use fewer — see SECONDARY_PC_CHANNELS)
-     * @param {object} [channelConfig] - DataChannel config override (e.g.
-     *        UNORDERED_CHANNEL_CONFIG). Defaults to CHANNEL_CONFIG (ordered).
-     *        Both peers MUST use the same config for negotiated channels.
+     * @param {object | ((i: number) => object)} [channelConfig] - DataChannel config
+     *        override (e.g. UNORDERED_CHANNEL_CONFIG), or a function giving the config
+     *        for channel i (e.g. primaryChannelConfig). Defaults to CHANNEL_CONFIG (ordered).
      */
     createChannels(onChannelReady, count = MAX_CHANNELS, channelConfig = CHANNEL_CONFIG) {
         for (let i = 0; i < count; i++) {
+            const config = typeof channelConfig === 'function' ? channelConfig(i) : channelConfig;
             const channel = this.pc.createDataChannel(`transfer-${i}`, {
-                ...channelConfig,
+                ...config,
                 id: i,
                 negotiated: true,
             });

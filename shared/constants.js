@@ -110,6 +110,11 @@ export function initialWindowForRtt(rttMs) {
 // of one chunk overlaps the reads/sends of others; still bounded so CPU contention
 // and channel backpressure stay in check. Purely sender-local — no wire impact.
 export const SENDER_CONCURRENCY = 8;
+// Ceiling for the push window (chunks in flight). The window starts from the
+// handshake RTT and grows while it is the limiter — full window, idle channel —
+// so it can track RTT that rises mid-transfer. 256 × 256 KB = 64 MB caps what the
+// receiver may hold undecrypted/unwritten at once.
+export const PUSH_WINDOW_MAX = 256;
 export const MAX_RETRY_COUNT = 5;
 export const STALL_TIMEOUT_MS = 10_000; // 10 s — no chunk received → stalled
 
@@ -600,12 +605,23 @@ export const CHANNEL_CONFIG = {
 // lost on a lossy intercontinental link (200ms RTT, 2% loss), ordered channels stall
 // the entire stream for 1+ RTT while SCTP retransmits. Unordered channels let
 // subsequent chunks arrive immediately; the Receiver's _pendingData / _pendingMeta
-// maps already reassemble them. Activated ONLY when both peers negotiate support
-// via `supportsUnordered: true` in BATCH_META / FILE_META — old clients never see
-// this flag and continue with ordered channels (backward compatible).
+// maps already reassemble them (a chunk's binary may overtake its CHUNK_DATA meta).
+// Ordering is a send-side property of each SCTP message, so a peer still on ordered
+// channels interoperates — it just keeps its own head-of-line blocking.
 export const UNORDERED_CHANNEL_CONFIG = {
     ordered: false,
 };
+
+/**
+ * Config for primary channel `i`. Channel 0 stays ordered: it carries FILE_META,
+ * which must land before that file's chunks on the same channel. Every other
+ * channel only carries chunks and order-insensitive control frames, so it is
+ * unordered and one lost packet no longer stalls the chunks queued behind it.
+ * @param {number} i
+ */
+export function primaryChannelConfig(i) {
+    return i === 0 ? CHANNEL_CONFIG : UNORDERED_CHANNEL_CONFIG;
+}
 
 export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB
 // High-water mark for per-channel send backpressure. send() blocks once a

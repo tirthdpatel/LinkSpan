@@ -15,7 +15,10 @@ import { DestinationManager, isFsAccessSupported } from '../storage/DestinationM
 import { CryptoEngine } from '../crypto/CryptoEngine';
 import { getLocalIdentity } from '../core/DeviceIdentity';
 import { reportTransfer } from '../telemetry/Telemetry';
-import { TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE, EXTRA_PEER_CONNECTIONS } from '@shared/constants.js';
+import {
+    TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE, EXTRA_PEER_CONNECTIONS,
+    MAX_CHANNELS, UNORDERED_CHANNEL_CONFIG, primaryChannelConfig,
+} from '@shared/constants.js';
 
 /**
  * Perform an ECDH key exchange over a channel (DataChannel or relay) and resolve
@@ -474,7 +477,9 @@ export function useConnection({
                 // extra SDP/ICE rides the same signaling session tagged with pcIndex
                 // inside the payload, which old peers and the server pass through or
                 // ignore. Failures never affect the primary connection.
-                const multiConn = new MultiConnection({ signaling, channelManager, iceServers });
+                const multiConn = new MultiConnection({
+                    signaling, channelManager, iceServers, channelConfig: UNORDERED_CHANNEL_CONFIG,
+                });
                 multiConnRef.current = multiConn;
                 // How many secondaries the remote peer accepts (receiver echoes this
                 // in its answer payload; 0 = old client / unsupported).
@@ -518,7 +523,7 @@ export function useConnection({
                             return;
                         }
 
-                        peer.createChannels(() => {});
+                        peer.createChannels(() => {}, MAX_CHANNELS, primaryChannelConfig);
                         channelManager.setChannels(peer.channels);
 
                         // Negotiated data channels never fire pc.ondatachannel (so the
@@ -564,7 +569,7 @@ export function useConnection({
                     // already-negotiated channels — re-creating them would collide on the
                     // fixed channel ids. Just answer to refresh the ICE transport.
                     if (!isRestart) {
-                        peer.createChannels(() => {});
+                        peer.createChannels(() => {}, MAX_CHANNELS, primaryChannelConfig);
                         channelManager.setChannels(peer.channels);
 
                         // Wire channel open events for receiver side
