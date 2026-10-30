@@ -238,9 +238,10 @@ describe('Range-list chunk requests (CHUNK_REQUEST_RANGE)', () => {
 
 describe('Sender push mode', () => {
     /** Sender-side endpoint that records pushed chunk indices; ACKs are fed in by hand. */
-    function makeSenderEndpoint() {
+    function makeSenderEndpoint({ buffered = 64 * 1024 } = {}) {
         return {
             _onMessage: null,
+            buffered,     // bufferedAmount every channel reports (0 = idle link)
             pushed: [],
             onMessage(h) { this._onMessage = h; },
             async send(_i, data) {
@@ -252,7 +253,7 @@ describe('Sender push mode', () => {
             ack(highestContiguous, received) {
                 return this._onMessage(JSON.stringify({ type: TRANSFER_MSG.PUSH_ACK, highestContiguous, received }), 0);
             },
-            getChannelStats() { return [{ index: 0, state: 'open', bufferedAmount: 0, throughput: 0 }]; },
+            getChannelStats() { return [{ index: 0, state: 'open', bufferedAmount: this.buffered, throughput: 0 }]; },
         };
     }
 
@@ -301,5 +302,30 @@ describe('Sender push mode', () => {
         await new Promise((r) => setTimeout(r, 50));
         expect(ep.pushed).toHaveLength(44);
         sender.stop();
+    });
+
+    test('the window grows while it is the limiter and stays put when the link is busy', async () => {
+        const file = new File([randomBytes(80 * 256 * 1024)], 'p.bin');
+
+        // Busy link (every channel has a backlog): window stays at 24 without ACKs.
+        const busy = makeSenderEndpoint();
+        const s1 = new Sender(file, busy, () => {}, null, () => {}, null);
+        s1.start();
+        s1.startPush(24);
+        await waitFor(() => busy.pushed.length === 24);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(busy.pushed).toHaveLength(24);
+        s1.stop();
+
+        // Idle channel while the window is full: the window, not the link, is the
+        // limit, so it grows (24 → 36 → 54 → 81) instead of waiting for an ACK.
+        const idle = makeSenderEndpoint({ buffered: 0 });
+        const s2 = new Sender(file, idle, () => {}, null, () => {}, null);
+        s2.start();
+        s2.startPush(24);
+        await waitFor(() => idle.pushed.length === s2.chunkManager.totalChunks);
+        expect(s2._pushWindow).toBeGreaterThan(24);
+        expect(new Set(idle.pushed).size).toBe(idle.pushed.length); // still no duplicates
+        s2.stop();
     });
 });

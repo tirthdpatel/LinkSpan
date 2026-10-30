@@ -9,6 +9,7 @@ import {
     TRANSFER_MSG,
     MAX_RETRY_COUNT,
     SENDER_CONCURRENCY,
+    PUSH_WINDOW_MAX,
     pickChunkSize,
 } from '@shared/constants.js';
 import { validateRanges, rangesToChunks } from '@shared/chunkRanges.js';
@@ -278,6 +279,12 @@ export class Sender {
             const windowEnd = Math.min(base + this._pushWindow, total);
 
             if (this._pushNext >= windowEnd) {
+                // Full window while a channel sits idle: the window, not the link, is
+                // the limiter (e.g. RTT rose after the handshake sized it) — grow it.
+                if (this._pushWindow < PUSH_WINDOW_MAX && this._hasIdleChannel()) {
+                    this._pushWindow = Math.min(Math.ceil(this._pushWindow * 1.5), PUSH_WINDOW_MAX);
+                    continue;
+                }
                 // Window full of unconfirmed chunks — sleep until PUSH_ACK wakes us
                 await new Promise((resolve) => {
                     this._pushWake = resolve;
@@ -306,6 +313,12 @@ export class Sender {
             }
             await Promise.all(workers);
         }
+    }
+
+    /** Is any open channel's send buffer empty (i.e. the link could take more)? */
+    _hasIdleChannel() {
+        return this.channelManager.getChannelStats()
+            .some((s) => s.state === 'open' && s.bufferedAmount === 0);
     }
 
     /**
