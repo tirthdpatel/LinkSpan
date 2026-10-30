@@ -15,6 +15,9 @@ export class ChannelManager {
         this._drainCallbacks = [];
         /** @type {{ bytes: number, timestamp: number }[]} */
         this.stats = [];
+        /** @type {number[]} peer-connection index of each channel (0 = primary) */
+        this.connections = [];
+        this._connectionCount = 0;
         this._onMessage = null;
         /** @type {Function | null} one-time interceptor for FILE_META detection */
         this._onFirstMessage = null;
@@ -28,6 +31,8 @@ export class ChannelManager {
         this.channels = [];
         this.ready = [];
         this.stats = [];
+        this.connections = [];
+        this._connectionCount = 0;
         this.addChannels(channels);
     }
 
@@ -36,14 +41,18 @@ export class ChannelManager {
      * Used to add a secondary peer connection's channels mid-transfer — senders and
      * receivers address channels by index, so existing indices never change; new
      * channels simply extend the pool that sendAny()/_pickChannel() draw from.
+     * Each call is one peer connection; its channels share that connection's
+     * congestion window, so senders balance load per connection, not per channel.
      * @param {RTCDataChannel[]} channels
      */
     addChannels(channels) {
+        const connection = this._connectionCount++;
         for (const ch of channels) {
             const i = this.channels.length;
             this.channels.push(ch);
             this.ready.push(ch.readyState === 'open');
-            this.stats.push({ bytes: 0, timestamp: Date.now() });
+            this.connections.push(connection);
+            this.stats.push({ bytes: 0, timestamp: Date.now(), buffered: ch.bufferedAmount || 0 });
 
             ch.onopen = () => {
                 this.ready[i] = true;
@@ -151,13 +160,18 @@ export class ChannelManager {
     getChannelStats() {
         const now = Date.now();
         return this.channels.map((ch, i) => {
-            const elapsed = (now - this.stats[i].timestamp) / 1000;
-            const throughput = elapsed > 0 ? this.stats[i].bytes / elapsed : 0;
+            const s = this.stats[i];
+            const elapsed = (now - s.timestamp) / 1000;
+            // Bytes that actually left: handed to the channel minus what is still
+            // queued in its send buffer. Counting hand-offs alone shows a channel with
+            // a big backlog as idle while it is in fact draining it onto the wire.
+            const wireBytes = Math.max(0, s.bytes - (ch.bufferedAmount - s.buffered));
             return {
                 index: i,
+                connection: this.connections[i],
                 state: ch.readyState,
                 bufferedAmount: ch.bufferedAmount,
-                throughput, // bytes/sec since last reset
+                throughput: elapsed > 0 ? wireBytes / elapsed : 0, // bytes/sec since last reset
             };
         });
     }
@@ -167,7 +181,7 @@ export class ChannelManager {
      */
     resetStats() {
         const now = Date.now();
-        this.stats = this.stats.map(() => ({ bytes: 0, timestamp: now }));
+        this.stats = this.channels.map((ch) => ({ bytes: 0, timestamp: now, buffered: ch.bufferedAmount || 0 }));
     }
 
     /**

@@ -546,19 +546,30 @@ export class Sender {
     }
 
     /**
-     * Pick the channel with the lowest buffered amount (best for sending).
+     * Pick a channel on the peer connection with the least data queued, then the
+     * least-buffered channel on it. Channels on one connection share its congestion
+     * window, so balancing per channel would keep piling chunks onto a connection
+     * with many channels (the primary has 7) while the others sit idle.
      * Returns -1 if no channels are open.
      * @returns {number}
      */
     _pickBestChannel() {
-        const stats = this.channelManager.getChannelStats();
-        let best = -1;
-        let lowestBuffer = Infinity;
+        const stats = this.channelManager.getChannelStats().filter((s) => s.state === 'open');
+        const connKey = (s) => s.connection ?? `ch${s.index}`;
+        const queued = new Map();
+        for (const s of stats) {
+            queued.set(connKey(s), (queued.get(connKey(s)) || 0) + s.bufferedAmount);
+        }
 
-        for (const stat of stats) {
-            if (stat.state === 'open' && stat.bufferedAmount < lowestBuffer) {
-                lowestBuffer = stat.bufferedAmount;
-                best = stat.index;
+        let best = -1;
+        let bestConn = Infinity;
+        let bestChan = Infinity;
+        for (const s of stats) {
+            const q = queued.get(connKey(s));
+            if (q < bestConn || (q === bestConn && s.bufferedAmount < bestChan)) {
+                bestConn = q;
+                bestChan = s.bufferedAmount;
+                best = s.index;
             }
         }
 

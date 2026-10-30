@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import { ChannelManager } from '../core/ChannelManager.js';
+import { Sender } from '../transfer/Sender.js';
 
 // Tests for the channel pool — in particular addChannels(), which appends a
 // secondary peer connection's channels mid-transfer without disturbing existing
@@ -91,5 +92,47 @@ describe('ChannelManager throughput stats', () => {
 
         expect(cm.stats[0].bytes).toBe(0);
         expect(cm.stats[1].bytes).toBe(1004);
+    });
+});
+
+describe('ChannelManager connections and wire throughput', () => {
+    test('each setChannels/addChannels call is one connection', () => {
+        const cm = new ChannelManager();
+        cm.setChannels([makeFakeChannel(), makeFakeChannel()]);
+        cm.addChannels([makeFakeChannel()]);
+        cm.addChannels([makeFakeChannel(), makeFakeChannel()]);
+        expect(cm.getChannelStats().map((s) => s.connection)).toEqual([0, 0, 1, 2, 2]);
+    });
+
+    test('throughput counts bytes that left, not bytes still queued', async () => {
+        const cm = new ChannelManager();
+        const ch = makeFakeChannel();
+        cm.setChannels([ch]);
+        cm.stats[0].timestamp = Date.now() - 1000; // one second of sampling
+
+        await cm.send(0, new ArrayBuffer(1000));
+        ch.bufferedAmount = 600; // 600 of the 1000 bytes are still queued
+        expect(cm.getChannelStats()[0].throughput).toBeCloseTo(400, -1);
+
+        // After a reset the still-queued bytes draining out count as throughput.
+        cm.resetStats();
+        cm.stats[0].timestamp = Date.now() - 1000;
+        ch.bufferedAmount = 0;
+        expect(cm.getChannelStats()[0].throughput).toBeCloseTo(600, -1);
+    });
+});
+
+describe('Sender channel picking', () => {
+    test('balances by connection: a backed-up 7-channel connection loses to a lighter one', () => {
+        const stats = [];
+        // Primary: 7 channels × 300 KB queued = 2.1 MB on one congestion window.
+        for (let i = 0; i < 7; i++) stats.push({ index: i, connection: 0, state: 'open', bufferedAmount: 300_000 });
+        // Secondary: 2 channels × 400 KB = 0.8 MB — each channel fuller, connection lighter.
+        stats.push({ index: 7, connection: 1, state: 'open', bufferedAmount: 400_000 });
+        stats.push({ index: 8, connection: 1, state: 'open', bufferedAmount: 350_000 });
+        stats.push({ index: 9, connection: 2, state: 'closed', bufferedAmount: 0 });
+
+        const sender = new Sender(new File([new Uint8Array(10)], 'x'), { getChannelStats: () => stats }, () => {});
+        expect(sender._pickBestChannel()).toBe(8);
     });
 });

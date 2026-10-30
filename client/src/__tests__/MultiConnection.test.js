@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { MultiConnection } from '../core/MultiConnection.js';
-import { EXTRA_PEER_CONNECTIONS, SECONDARY_PC_CHANNELS } from '@shared/constants.js';
+import { EXTRA_PEER_CONNECTIONS, EXTRA_PEER_CONNECTIONS_LAN, SECONDARY_PC_CHANNELS } from '@shared/constants.js';
 
 // Unit tests for secondary-connection negotiation: pcIndex tagging of SDP/ICE
 // payloads, capability clamping, early-candidate buffering, and teardown — over a
@@ -83,6 +83,13 @@ describe('MultiConnection.negotiatedCount', () => {
         expect(MultiConnection.negotiatedCount(99)).toBe(EXTRA_PEER_CONNECTIONS);
         expect(MultiConnection.negotiatedCount(1)).toBe(1);
     });
+    test('allows more connections when the caller raises the cap (LAN path)', () => {
+        expect(MultiConnection.negotiatedCount(99, EXTRA_PEER_CONNECTIONS_LAN)).toBe(EXTRA_PEER_CONNECTIONS_LAN);
+        // An old receiver advertising 3 still gets at most 3, whatever the cap.
+        expect(MultiConnection.negotiatedCount(3, EXTRA_PEER_CONNECTIONS_LAN)).toBe(3);
+        // The cap can never exceed what receivers accept.
+        expect(MultiConnection.negotiatedCount(99, 50)).toBe(EXTRA_PEER_CONNECTIONS_LAN);
+    });
     test('treats missing/hostile values as unsupported', () => {
         expect(MultiConnection.negotiatedCount(undefined)).toBe(0);
         expect(MultiConnection.negotiatedCount(null)).toBe(0);
@@ -143,7 +150,7 @@ describe('receiver side', () => {
 
     test('rejects out-of-range or malformed pcIndex offers', async () => {
         await multi.handleOffer({ type: 'offer', sdp: 'x', pcIndex: 0 });
-        await multi.handleOffer({ type: 'offer', sdp: 'x', pcIndex: EXTRA_PEER_CONNECTIONS + 1 });
+        await multi.handleOffer({ type: 'offer', sdp: 'x', pcIndex: EXTRA_PEER_CONNECTIONS_LAN + 1 });
         await multi.handleOffer({ type: 'offer', sdp: 'x', pcIndex: 'evil' });
         expect(FakeRTCPeerConnection.instances).toHaveLength(0);
         expect(signaling.answers).toHaveLength(0);
