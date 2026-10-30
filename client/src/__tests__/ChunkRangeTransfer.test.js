@@ -235,3 +235,50 @@ describe('Range-list chunk requests (CHUNK_REQUEST_RANGE)', () => {
         expect(senderEp.sentText.filter((f) => f.includes(TRANSFER_MSG.CHUNK_DATA)).length).toBe(0);
     });
 });
+
+describe('Sender push mode', () => {
+    /** Sender-side endpoint that records pushed chunk indices; ACKs are fed in by hand. */
+    function makeSenderEndpoint() {
+        return {
+            _onMessage: null,
+            pushed: [],
+            onMessage(h) { this._onMessage = h; },
+            async send(_i, data) {
+                if (typeof data !== 'string') return;
+                const msg = JSON.parse(data);
+                if (msg.type === TRANSFER_MSG.CHUNK_DATA) this.pushed.push(msg.index);
+            },
+            async sendAny(data) { await this.send(0, data); return 0; },
+            ack(highestContiguous) {
+                return this._onMessage(JSON.stringify({ type: TRANSFER_MSG.PUSH_ACK, highestContiguous }), 0);
+            },
+            getChannelStats() { return [{ index: 0, state: 'open', bufferedAmount: 0, throughput: 0 }]; },
+        };
+    }
+
+    async function waitFor(cond) {
+        for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+        expect(cond()).toBe(true);
+    }
+
+    test('an ACK that lags the pushes does not re-push chunks still in flight', async () => {
+        const file = new File([randomBytes(30 * 256 * 1024)], 'p.bin');
+        const ep = makeSenderEndpoint();
+        const sender = new Sender(file, ep, () => {}, null, () => {}, null);
+        const total = sender.chunkManager.totalChunks;
+        expect(total).toBeGreaterThan(24);
+
+        sender.start();
+        sender.startPush(24);
+        await waitFor(() => ep.pushed.length === 24);
+
+        // The receiver has confirmed only 0..9 while 10..23 are still on the wire.
+        await ep.ack(9);
+        await waitFor(() => ep.pushed.length >= total);
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect([...ep.pushed].sort((a, b) => a - b)).toEqual([...Array(total).keys()]);
+        expect(sender.getLossStats().retransmits).toBe(0);
+        sender.stop();
+    });
+});

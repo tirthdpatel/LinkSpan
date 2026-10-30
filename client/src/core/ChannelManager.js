@@ -115,6 +115,9 @@ export class ChannelManager {
         }
 
         ch.send(data);
+        // Count outgoing bytes too — otherwise the sender's diagnostics only see the
+        // receiver's small control frames and every channel reads as idle.
+        this.stats[channelIndex].bytes += data.byteLength || data.length || 0;
     }
 
     /**
