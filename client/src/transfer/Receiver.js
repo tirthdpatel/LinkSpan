@@ -114,6 +114,13 @@ export class Receiver {
         this._pushMode = !!(fileMeta.supportsPush);
         /** Highest chunk index received without a gap from 0 */
         this._highestContiguous = -1;
+        /** Chunks fully processed this session (written, or skipped as duplicates), in
+         *  any order. Sent in PUSH_ACK as `received` so the sender can bound chunks in
+         *  flight rather than distance from the contiguous prefix — one chunk stuck on a
+         *  slow connection must not idle every other channel. Counted after the write,
+         *  not on arrival, so the window also bounds chunks waiting to be decrypted
+         *  and written here. */
+        this._processed = 0;
         /** Counter to batch PUSH_ACK sends (every N chunks) */
         this._pushAckCounter = 0;
         /** How often to send PUSH_ACK (every N chunks received) */
@@ -367,6 +374,7 @@ export class Receiver {
         // Duplicate chunk guard (ResumeManager is the source of truth)
         if (this.resumeManager.hasChunk(this.fileMeta.fileId, index)) {
             // Already have this chunk — skip without error
+            this._processed++;
             this._requestNextChunks();
             return;
         }
@@ -416,6 +424,7 @@ export class Receiver {
 
         // Mark as received in ResumeManager (persisted via debounce)
         this.resumeManager.markChunkReceived(this.fileMeta.fileId, index);
+        this._processed++;
         // Record the hash for the whole-file manifest root. verifyChunk above already
         // proved meta.hash IS the plaintext's hash, so store it directly instead of
         // hashing the chunk a second time (one SHA-256 per chunk saved on the hot path).
@@ -485,6 +494,7 @@ export class Receiver {
             const msg = JSON.stringify({
                 type: TRANSFER_MSG.PUSH_ACK,
                 highestContiguous: this._highestContiguous,
+                received: this._processed,
             });
             this.channelManager.sendAny(msg).catch(() => { /* sender may be gone */ });
         }
@@ -799,6 +809,7 @@ export class Receiver {
             this.channelManager.sendAny(JSON.stringify({
                 type: TRANSFER_MSG.PUSH_ACK,
                 highestContiguous: this._highestContiguous,
+                received: this._processed,
             })).catch(() => {});
         } else {
             // Pull mode stall: re-request all in-flight chunks
