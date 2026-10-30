@@ -63,6 +63,15 @@ export const EXTRA_PEER_CONNECTIONS = 3; // secondaries; total = 1 + this
 // NOTE: briefly raised to 5 in the speed swarm, then reverted — a reflexive P2P transfer
 // that worked pre-swarm started stalling, so we restored the known-good connection-layer
 // config (this + ordered channels + Google-only STUN). Re-raise only with a tested path.
+// On a host (same-LAN) path more connections are opened: each SCTP association's
+// Reno-style congestion control caps it well below the LAN's capacity once RTT is
+// non-trivial, so throughput scales with the association count. Reflexive/relay
+// paths keep EXTRA_PEER_CONNECTIONS. Receivers accept up to this many.
+export const EXTRA_PEER_CONNECTIONS_LAN = 6;
+// Gap between opening secondaries. Both LAN peers share one public IP, and the
+// signaling server allows MAX_MESSAGES_PER_SEC per IP; each connection's offer,
+// answer and ICE candidates opened all at once could exceed it and drop candidates.
+export const SECONDARY_OPEN_STAGGER_MS = 250;
 // Data channels per SECONDARY connection. Channels on one association share its
 // congestion window, so extra channels add head-of-line relief, not bandwidth;
 // a couple per secondary keeps meta+binary pairs flowing without the setup cost
@@ -627,8 +636,9 @@ export const BUFFERED_AMOUNT_LOW_THRESHOLD = 64 * 1024; // 64 KB
 // High-water mark for per-channel send backpressure. send() blocks once a
 // channel's bufferedAmount exceeds this, then resumes on bufferedamountlow. At
 // 256 KB chunks the old limit (BUFFERED_AMOUNT_LOW_THRESHOLD × 4 = 256 KB) drained
-// after a single buffered chunk, so a fast link kept stalling between chunks. 4 MB
-// lets each channel hold ~16 chunks in its send buffer and stay saturated on a fast
-// link without draining between sends. Still bounded (backpressure resumes on
-// bufferedamountlow), so buffering never grows without limit. Sender-local.
-export const SEND_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4 MB
+// after a single buffered chunk, so a fast link kept stalling between chunks. 1 MB
+// holds ~4 chunks per channel — enough to stay saturated — without letting one
+// connection queue tens of MB (4 MB × 7 primary channels = 28 MB was ~20 s of
+// backlog at ~1 MB/s per association, during which the picker starved it).
+// Still bounded (backpressure resumes on bufferedamountlow). Sender-local.
+export const SEND_HIGH_WATER_MARK = 1024 * 1024; // 1 MB

@@ -1,4 +1,9 @@
-import { EXTRA_PEER_CONNECTIONS, SECONDARY_PC_CHANNELS } from '@shared/constants.js';
+import {
+    EXTRA_PEER_CONNECTIONS,
+    EXTRA_PEER_CONNECTIONS_LAN,
+    SECONDARY_PC_CHANNELS,
+    SECONDARY_OPEN_STAGGER_MS,
+} from '@shared/constants.js';
 import { PeerConnection } from './PeerConnection.js';
 
 /**
@@ -63,10 +68,14 @@ export class MultiConnection {
         }
     }
 
-    /** How many secondaries to open given what the remote advertised. */
-    static negotiatedCount(remoteAdvertised) {
+    /**
+     * How many secondaries to open given what the remote advertised.
+     * @param {number} remoteAdvertised
+     * @param {number} [cap] - local ceiling (EXTRA_PEER_CONNECTIONS_LAN on a host path)
+     */
+    static negotiatedCount(remoteAdvertised, cap = EXTRA_PEER_CONNECTIONS) {
         const n = Number.isInteger(remoteAdvertised) ? remoteAdvertised : 0;
-        return Math.max(0, Math.min(n, EXTRA_PEER_CONNECTIONS));
+        return Math.max(0, Math.min(n, cap, EXTRA_PEER_CONNECTIONS_LAN));
     }
 
     /** Is this SDP/ICE payload addressed to a secondary connection? */
@@ -83,6 +92,10 @@ export class MultiConnection {
     async openSecondaries(count) {
         for (let pcIndex = 1; pcIndex <= count; pcIndex++) {
             if (this._closed || this._pcs.has(pcIndex)) continue;
+            // Stagger opens so offers + ICE candidates stay under the signaling
+            // server's per-IP message rate (see SECONDARY_OPEN_STAGGER_MS).
+            if (pcIndex > 1) await new Promise((r) => setTimeout(r, SECONDARY_OPEN_STAGGER_MS));
+            if (this._closed) return;
             try {
                 const peer = this._createPeer(pcIndex);
                 const offer = await peer.createOffer();
@@ -160,7 +173,7 @@ export class MultiConnection {
     // ── Private ────────────────────────────────────────────────
 
     _validIndex(pcIndex) {
-        return Number.isInteger(pcIndex) && pcIndex >= 1 && pcIndex <= EXTRA_PEER_CONNECTIONS;
+        return Number.isInteger(pcIndex) && pcIndex >= 1 && pcIndex <= EXTRA_PEER_CONNECTIONS_LAN;
     }
 
     _createPeer(pcIndex) {

@@ -16,7 +16,7 @@ import { CryptoEngine } from '../crypto/CryptoEngine';
 import { getLocalIdentity } from '../core/DeviceIdentity';
 import { reportTransfer } from '../telemetry/Telemetry';
 import {
-    TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE, EXTRA_PEER_CONNECTIONS,
+    TRANSFER_MSG, TRANSFER_STATE, TRANSFER_TYPE, EXTRA_PEER_CONNECTIONS, EXTRA_PEER_CONNECTIONS_LAN,
     MAX_CHANNELS, UNORDERED_CHANNEL_CONFIG, primaryChannelConfig,
 } from '@shared/constants.js';
 
@@ -593,7 +593,8 @@ export function useConnection({
                     const answer = await peer.createAnswer();
                     // Advertise multi-connection support in-band; the extra field is
                     // relayed opaquely by the server and ignored by old senders.
-                    signaling.sendAnswer({ ...answer, multiConn: EXTRA_PEER_CONNECTIONS });
+                    // Advertise the most we accept; the sender picks fewer off-LAN.
+                    signaling.sendAnswer({ ...answer, multiConn: EXTRA_PEER_CONNECTIONS_LAN });
                 });
 
                 signaling.on('answer', async (answer) => {
@@ -601,7 +602,7 @@ export function useConnection({
                         await multiConn.handleAnswer(answer);
                         return;
                     }
-                    remoteMultiConn = MultiConnection.negotiatedCount(answer.multiConn);
+                    remoteMultiConn = MultiConnection.negotiatedCount(answer.multiConn, EXTRA_PEER_CONNECTIONS_LAN);
                     await peer.setRemoteDescription(answer);
                 });
 
@@ -663,7 +664,15 @@ export function useConnection({
                 // immediately on the primary; secondaries add their channels to the
                 // pool as they connect. Never opened on the relay fallback.
                 if (role === 'sender' && cm === channelManager && remoteMultiConn > 0) {
-                    multiConn.openSecondaries(remoteMultiConn).catch(() => { /* opportunistic */ });
+                    // More connections only on a true LAN path; reflexive/relay keep the
+                    // known-good count (see EXTRA_PEER_CONNECTIONS).
+                    peer.getStats()
+                        .then((s) => s?.pathType, () => null)
+                        .then((pathType) => {
+                            const cap = pathType === 'host' ? EXTRA_PEER_CONNECTIONS_LAN : EXTRA_PEER_CONNECTIONS;
+                            return multiConn.openSecondaries(MultiConnection.negotiatedCount(remoteMultiConn, cap));
+                        })
+                        .catch(() => { /* opportunistic */ });
                 }
 
                 resolve(cm);
